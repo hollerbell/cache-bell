@@ -1,0 +1,3 @@
+# The same line endings whatever the machine: a shell script with CRLF does not run.
+* text=auto eol=lf
+*.bat text eol=crlf

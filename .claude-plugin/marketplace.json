@@ -1,0 +1,14 @@
+{
+  "name": "cache-bell",
+  "description": "Cache Bell: keeps a long Claude Code session from re-sending its whole context after a break",
+  "owner": {
+    "name": "FEO digital agency s.r.o."
+  },
+  "plugins": [
+    {
+      "name": "cache-bell",
+      "source": "./",
+      "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation."
+    }
+  ]
+}

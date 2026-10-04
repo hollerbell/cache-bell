@@ -1,0 +1,87 @@
+import { expect, test } from 'claude-code/testing'
+
+import { TTL_1H, TTL_5M } from '../../core/timing'
+import { tailCommand, ttlFromTranscript, ttlOfLine } from '../../core/transcript'
+
+// A transcript row as Claude Code 2.1.288 writes it, cut down to what matters here.
+const assistant = (short: unknown, long: unknown, extra: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    type: 'assistant',
+    isSidechain: false,
+    message: {
+      role: 'assistant',
+      usage: {
+        input_tokens: 2,
+        cache_creation_input_tokens: 1351,
+        cache_read_input_tokens: 361612,
+        cache_creation: { ephemeral_1h_input_tokens: long, ephemeral_5m_input_tokens: short },
+      },
+    },
+    ...extra,
+  })
+
+const user = JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'hi' } })
+
+test('one line names the TTL of its cache write', () => {
+  const table: [string, string, number | null][] = [
+    ['a 5-minute write', assistant(1351, 0), TTL_5M],
+    ['a 1-hour write', assistant(0, 1351), TTL_1H],
+    ['both at once: the shorter decides', assistant(10, 1351), TTL_5M],
+    ['a 5-minute write of a single token', assistant(1, 0), TTL_5M],
+    ['a 1-hour write of a single token', assistant(0, 1), TTL_1H],
+    ['a response that only read the cache', assistant(0, 0), null],
+    ['a subagent response', assistant(0, 1351, { isSidechain: true }), null],
+    ['a user row', user, null],
+    ['a row of another type with usage', assistant(0, 1351, { type: 'progress' }), null],
+    ['no cache_creation split', JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1 } } }), null],
+    ['no usage', JSON.stringify({ type: 'assistant', message: {} }), null],
+    ['no message', JSON.stringify({ type: 'assistant' }), null],
+    ['counts that are not numbers', assistant('1351', null), null],
+    ['a negative count', assistant(-5, 0), null],
+    ['a line cut in the middle', assistant(0, 1351).slice(40), null],
+    ['not an object', '[1,2,3]', null],
+    ['null', 'null', null],
+    ['empty', '', null],
+  ]
+  for (const [name, line, ttl] of table) expect({ name, ttl: ttlOfLine(line) }).toEqual({ name, ttl })
+})
+
+test('the newest line that names a TTL wins', () => {
+  const table: [string, string[], number | null][] = [
+    ['empty text', [], null],
+    ['only user rows', [user, user], null],
+    ['the last response decides', [assistant(0, 100), user, assistant(100, 0)], TTL_5M],
+    ['the last response decides, the other way', [assistant(100, 0), user, assistant(0, 100)], TTL_1H],
+    ['a pure cache read is skipped for the write before it', [assistant(0, 100), user, assistant(0, 0)], TTL_1H],
+    ['a subagent at the end is skipped', [assistant(0, 100), assistant(100, 0, { isSidechain: true })], TTL_1H],
+    ['a tail that starts mid-line', [assistant(100, 0).slice(25), user, assistant(0, 100)], TTL_1H],
+    ['a broken last line', [assistant(100, 0), '{"type":"assistant","mess'], TTL_5M],
+    ['blank lines and a trailing newline', [assistant(100, 0), '', '   ', ''], TTL_5M],
+  ]
+  for (const [name, lines, ttl] of table) {
+    expect({ name, ttl: ttlFromTranscript(lines.join('\n')) }).toEqual({ name, ttl })
+  }
+})
+
+test('the tail of a large file is read by the system the session runs on', () => {
+  expect(tailCommand('/srv/work/.claude/projects/x/s.jsonl', 60, false)).toEqual(['tail', '-n', '60', '/srv/work/.claude/projects/x/s.jsonl'])
+  expect(tailCommand('D:\\home\\me\\s.jsonl', 60, true)).toEqual([
+    'powershell',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    "Get-Content -LiteralPath 'D:\\home\\me\\s.jsonl' -Tail 60 -Encoding UTF8",
+  ])
+  // A path with a space and an apostrophe stays one quoted argument.
+  expect(tailCommand("D:\\home\\O'Neil\\my files\\s.jsonl", 5, true)[4]).toBe(
+    "Get-Content -LiteralPath 'D:\\home\\O''Neil\\my files\\s.jsonl' -Tail 5 -Encoding UTF8",
+  )
+  // PowerShell takes a typographic apostrophe for a quote as well: each of the four is doubled.
+  for (const quote of ['\u2018', '\u2019', '\u201A', '\u201B']) {
+    expect(tailCommand(`D:\\Tom${quote}s\\s.jsonl`, 5, true)[4]).toBe(`Get-Content -LiteralPath 'D:\\Tom${quote}${quote}s\\s.jsonl' -Tail 5 -Encoding UTF8`)
+  }
+})
+
+test('Windows line endings are read too', () => {
+  expect(ttlFromTranscript([assistant(0, 100), user, ''].join('\r\n'))).toBe(TTL_1H)
+})

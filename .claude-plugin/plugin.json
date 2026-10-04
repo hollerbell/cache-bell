@@ -1,0 +1,160 @@
+{
+  "name": "cache-bell",
+  "version": "0.2.0",
+  "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation.",
+  "author": {
+    "name": "FEO digital agency s.r.o."
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Turn off to pause the plugin without uninstalling it. Cache Bell, made by the Holler Bell team. hollerbell.com",
+      "default": true
+    },
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "notify: countdown and question only. keep: renew the cache silently, three times at most, never compact. prepare-compact: ask, renew twice, ask again, announce, compact. compact-only: compact before the cache expires. custom: use the five options below.",
+      "options": [
+        "notify",
+        "keep",
+        "prepare-compact",
+        "compact-only",
+        "custom"
+      ],
+      "default": "prepare-compact"
+    },
+    "ask": {
+      "type": "string",
+      "title": "Ask (custom mode)",
+      "description": "When to ask during one idle period: the first time, every time, or never.",
+      "options": [
+        "first",
+        "every",
+        "never"
+      ],
+      "default": "first"
+    },
+    "maxRenewals": {
+      "type": "number",
+      "title": "Renewals (custom mode)",
+      "description": "How many times the cache is renewed in one idle period, 0 to 3. Three is the most in any mode, counted by the requests sent: every renewal is a request on your plan that reads the whole context, and one that gets no answer is tried once more only within those three.",
+      "default": 2,
+      "min": 0,
+      "max": 3
+    },
+    "renewMethod": {
+      "type": "string",
+      "title": "Renewal method (custom mode)",
+      "description": "fork: a silent side request that leaves no trace in the conversation. none: do not keep the cache warm.",
+      "options": [
+        "fork",
+        "none"
+      ],
+      "default": "fork"
+    },
+    "prepareBeforeCompact": {
+      "type": "boolean",
+      "title": "Announce the compaction (custom mode)",
+      "description": "Tell the session that a compaction is coming, in a turn of its own, right before it.",
+      "default": true
+    },
+    "compact": {
+      "type": "boolean",
+      "title": "Compact (custom mode)",
+      "description": "Compact once the renewals are used up.",
+      "default": true
+    },
+    "preparePrompt": {
+      "type": "string",
+      "title": "Announcement",
+      "description": "What the session is told before a compaction. Empty = nothing is said.",
+      "default": "This conversation will be compacted right after this turn. Nothing is needed from you: a one-line reply is enough."
+    },
+    "pingPrompt": {
+      "type": "string",
+      "title": "Keep-alive prompt",
+      "description": "The prompt of a renewal.",
+      "default": "This request only keeps the prompt cache warm. Answer with the single word: ok"
+    },
+    "compactInstructions": {
+      "type": "string",
+      "title": "Compaction instructions",
+      "description": "Instructions for the summary, as after /compact. {time} and {idle} are filled in. Empty = a plain compaction.",
+      "default": ""
+    },
+    "ttl": {
+      "type": "string",
+      "title": "Cache TTL",
+      "description": "auto reads it from the session's transcript; 5m or 1h sets it by hand.",
+      "options": [
+        "auto",
+        "5m",
+        "1h"
+      ],
+      "default": "auto"
+    },
+    "minContextTokens": {
+      "type": "number",
+      "title": "Minimum context (tokens)",
+      "description": "Below this the plugin does nothing about an expiring cache: a small context is left alone. A compaction Claude asks for is not affected.",
+      "default": 100000,
+      "min": 0
+    },
+    "compactCountdown": {
+      "type": "number",
+      "title": "Compaction countdown (seconds)",
+      "description": "How long you have to cancel a compaction Claude asked for, 5 to 3600 seconds. Claude may name a time of its own with a request, 10 to 600 seconds, shorter or longer than this.",
+      "default": 30,
+      "min": 5,
+      "max": 3600
+    },
+    "sessionCompact": {
+      "type": "string",
+      "title": "Compaction asked for by the session",
+      "description": "What happens when Claude itself asks for a compaction (the compact skill). confirm: you are asked and it compacts when the countdown ends without your answer. wait: you are asked and the request is dropped unless you say Compact. auto: it compacts right after the turn. off: Claude cannot ask.",
+      "options": [
+        "confirm",
+        "wait",
+        "auto",
+        "off"
+      ],
+      "default": "confirm"
+    },
+    "askLeadMinutes": {
+      "type": "number",
+      "title": "Ask ahead (minutes)",
+      "description": "How long before the time to act the cache question appears. 0 = automatic: 15 minutes on an hour-long cache, 30 seconds on a five-minute one.",
+      "default": 0,
+      "min": 0
+    },
+    "display": {
+      "type": "string",
+      "title": "Display",
+      "description": "Where the countdown shows: the band above the prompt, the status line, both, or nowhere.",
+      "options": [
+        "band",
+        "status",
+        "both",
+        "off"
+      ],
+      "default": "band"
+    },
+    "showBelowMinutes": {
+      "type": "number",
+      "title": "Show the countdown below (minutes)",
+      "description": "The countdown of a warm cache appears once this many minutes or fewer are left. 0 = always shown. A cold cache, a question and the plugin at work are always shown.",
+      "default": 30,
+      "min": 0
+    },
+    "readTranscript": {
+      "type": "boolean",
+      "title": "Read the cache lifetime from the transcript",
+      "description": "The lifetime the API really granted (5 minutes or 1 hour) is written only in the session's transcript; the plugin reads the usage figures of its last lines, nothing of what was said. Off: the lifetime is taken from the Claude Code settings, a model switch or the ttl option, and may be wrong when the API grants less than was asked for.",
+      "default": true
+    }
+  }
+}

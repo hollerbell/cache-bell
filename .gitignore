@@ -1,0 +1,10 @@
+# local, per-clone instructions
+CLAUDE.local.md
+.claude/
+
+# types Claude Code lays next to a plugin loaded with --plugin-dir
+**/.claude-plugin/types/
+
+node_modules/
+dist/
+*.log

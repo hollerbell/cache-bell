@@ -1,0 +1,177 @@
+// The question in the band: its choices and their digits, why it is asked, the countdown whose line swings
+// between two colours, and what the transcript and the session are told. Plain values; the shell draws them.
+
+import type { Extension } from './extension'
+import type { AskReason, Config, State } from './types'
+import { BAND_PREFIX, MARK, NAME, PLUGIN, formatLeft, formatTokens } from './view'
+import type { Look } from './view'
+
+// How often the line is redrawn while the countdown runs: ten frames a second, the most a band is given.
+export const FRAME_MS = 100
+// One full swing from the first colour to the second and back.
+export const SWING_MS = 2000
+
+const DARK_TEXT = '#000000'
+
+// 'text': the text of the line swings between the two colours.
+// 'bg': the background does, under dark text.
+export type AskStyle = 'text' | 'bg'
+
+export type AskView = {
+  // the whole first line: what was asked and the countdown
+  text: string
+  color: string
+  // undefined = no background
+  backgroundColor: string | undefined
+  // the countdown as text, m:ss
+  left: string
+}
+
+const hex = (value: number): string => Math.round(value).toString(16).padStart(2, '0')
+
+// On a dark background a dark yellow and a strong yellow leaning to orange; on a light one two ambers dark
+// enough to read.
+const SWING: Record<Look, { from: readonly number[]; to: readonly number[] }> = {
+  dark: { from: [0xb3, 0x8f, 0x00], to: [0xff, 0xb0, 0x00] },
+  light: { from: [0x7a, 0x5c, 0x00], to: [0xb3, 0x6b, 0x00] },
+}
+
+// 0 = the first colour, 1 = the second.
+export const mixColor = (share: number, look: Look = 'dark'): string => {
+  const mix = Math.min(Math.max(share, 0), 1)
+  const { from, to } = SWING[look]
+  return `#${from.map((start, i) => hex(start + ((to[i] ?? start) - start) * mix)).join('')}`
+}
+
+// Where the swing stands after `elapsedMs`: 0 at the start, 1 half a swing later, 0 again after a whole one,
+// along a sine, so the colour slows down at both ends.
+export const swing = (elapsedMs: number): number => (1 - Math.cos((2 * Math.PI * elapsedMs) / SWING_MS)) / 2
+
+export const askView = (head: string, leftMs: number, totalMs: number, style: AskStyle = 'text', look: Look = 'dark'): AskView => {
+  const left = Math.min(Math.max(leftMs, 0), totalMs)
+  const swinging = mixColor(swing(totalMs - left), look)
+  // Rounded up, so the countdown reads 0:30 at the start and 0:00 only when the time is up.
+  const clock = formatLeft(Math.ceil(left / 1000) * 1000)
+  return {
+    text: `${head}${clock}`,
+    color: style === 'bg' ? DARK_TEXT : swinging,
+    backgroundColor: style === 'bg' ? swinging : undefined,
+    left: clock,
+  }
+}
+
+// The answers to the question. Each has a digit: typed alone into the empty prompt it selects the answer,
+// Enter confirms it at once, and without Enter the selected answer is what the time running out does.
+//   compact: compact the conversation now
+// when the cache is about to expire:
+//   renew:   keep the cache warm for another period and ask again before it runs out
+//   cancel:  do nothing and let the cache expire
+// when the session asked for the compaction:
+//   skip:    drop the request
+// An extension adds answers of its own to its own questions.
+export type OwnChoice = 'compact' | 'renew' | 'cancel' | 'skip'
+export type Choice = OwnChoice | (string & {})
+
+// `label` is on the button.
+export type ChoiceText = { label: string }
+
+export const CHOICES: Record<OwnChoice, ChoiceText> = {
+  compact: { label: 'Compact' },
+  renew: { label: 'Renew cache' },
+  cancel: { label: 'Let it expire' },
+  skip: { label: 'Not now' },
+}
+
+// The choices each of the core's reasons offers, in the order of their digits: the first is 1.
+export const CHOICES_OF: Record<'cache' | 'session', readonly Choice[]> = {
+  cache: ['compact', 'renew', 'cancel'],
+  session: ['compact', 'skip'],
+}
+
+const isOwn = (reason: AskReason): reason is 'cache' | 'session' => reason === 'cache' || reason === 'session'
+
+export const choicesOf = (reason: AskReason, extension: Extension): readonly Choice[] =>
+  isOwn(reason) ? CHOICES_OF[reason] : (extension.reasons[reason]?.choices ?? ['compact'])
+
+// Every answer there is, the core's and the extension's. The core's own keep their words.
+export const choiceTexts = (extension: Extension): Readonly<Record<string, ChoiceText>> => ({ ...extension.choices, ...CHOICES })
+
+export const digitOf = (choices: readonly Choice[], choice: Choice): string => String(choices.indexOf(choice) + 1)
+
+// The choice a draft names: exactly one of the digits, nothing around it.
+export const choiceOfDigit = (choices: readonly Choice[], draft: string): Choice | null =>
+  choices.find(choice => digitOf(choices, choice) === draft) ?? null
+
+export const CACHE_SOON = 'cache expires soon'
+
+// How many renewals the plugin would still do without an answer, in words; nothing in a mode that does not
+// renew.
+const renewalsLeft = (state: State, config: Config): string => {
+  if (config.renewMethod === 'none' || config.maxRenewals === 0) return ''
+  const left = Math.max(0, config.maxRenewals - state.renewals)
+  if (left === 0) return ', no automatic renewals left'
+  // What comes after them, so the person sees where the course leads.
+  const then = config.compact ? 'then compacts' : 'then expires'
+  return `, ${left} automatic ${left === 1 ? 'renewal' : 'renewals'} left, ${then}`
+}
+
+// The reason in words.
+export const whyText = (reason: AskReason, state: State, extension: Extension, config: Config): string => {
+  // What is at stake: the size of the context that would be sent again, when it is known.
+  const size = state.contextTokens === null ? '' : ` (${formatTokens(state.contextTokens)} tokens)`
+  if (reason === 'cache') return `${CACHE_SOON}${size}${renewalsLeft(state, config)}`
+  if (reason === 'session') return 'the session asked for a compaction'
+  return extension.reasons[reason]?.why(state) ?? ''
+}
+
+// `title` is who asks: the mark and the product's name. `head` follows it: why the plugin asks. `foot` is the
+// line under the choices and stands before the countdown: the selected choice is done when the time is up,
+// and, while the prompt holds a choice's digit, Enter does it at once.
+export const questionParts = (isTyped: boolean, why: string, selected: ChoiceText): { title: string; head: string; foot: string } => ({
+  title: BAND_PREFIX,
+  head: ` ${why.slice(0, 1).toUpperCase()}${why.slice(1)}:`,
+  foot: isTyped ? `[Enter] confirms · no answer: ${selected.label} in ` : `No answer: ${selected.label} in `,
+})
+
+// A choice as it is drawn: its digit, and the selected one between arrows. The other choices keep the same
+// width, so nothing moves when the selection does.
+export const choiceLabel = (digit: string, text: ChoiceText, isSelected: boolean): string =>
+  isSelected ? `[${digit}] >${text.label}<` : `[${digit}]  ${text.label} `
+
+// What stops a digit and Enter from reaching the model. Claude Code writes the reason into the transcript
+// behind words of its own ("Prompt dropped by a hook: ..."), which read as if something went wrong.
+export const dropReason = (chosen: ChoiceText): string => `${PLUGIN}: ${chosen.label}`
+
+// That transcript line, rewritten to say what happened; null for any other line.
+export const chosenNotice = (text: string, texts: Readonly<Record<string, ChoiceText>> = CHOICES): string | null => {
+  const match = new RegExp(`${PLUGIN}: (.+)$`).exec(text)
+  if (match === null || !Object.values(texts).some(choice => choice.label === match[1])) return null
+  return `${BAND_PREFIX} ${match[1]} chosen`
+}
+
+// Claude Code's line after it loaded the plugin again (an option changed, a file changed), which lists every
+// hook: cut to what happened. Null for any other line.
+export const reloadNotice = (text: string): string | null => {
+  const match = new RegExp(`^(${PLUGIN}: (?:.+ — )?reloaded) \\(\\d+ hooks?: [^)]*\\)$`).exec(text)
+  return match === null ? null : (match[1] ?? null)
+}
+
+// What the session's tool answers while the plugin stands down, for Claude to read.
+export const YIELDED_ANSWER =
+  'Refused: Cache Bell stands down in this session, the plugin built on it is at work. Ask for the compaction with that plugin\'s compact tool.'
+
+// What a subagent's call of the session's tool is answered: the conversation is not its to compact.
+export const SUBAGENT_ANSWER = 'Refused: only the main conversation can ask for a compaction. Tell the agent that started you instead.'
+
+// What the session's tool answers, for Claude to read.
+export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number): string => {
+  if (mode === 'off' || !isEnabled) {
+    return 'Refused: Cache Bell is set not to compact at a session\'s request. Tell the user; they can compact with /compact.'
+  }
+  const when = {
+    auto: 'The conversation will be compacted right after this turn ends.',
+    wait: 'When this turn ends the user is asked; this request compacts the conversation only if they say so.',
+    confirm: `When this turn ends the user is asked and has up to ${Math.round(countdownMs / 1000)} seconds to cancel; without an answer the conversation is compacted.`,
+  }[mode]
+  return `Compaction requested. ${when} End this turn now and call no more tools.`
+}
