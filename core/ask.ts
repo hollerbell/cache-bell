@@ -163,6 +163,10 @@ export const YIELDED_ANSWER =
 // What a subagent's call of the session's tool is answered: the conversation is not its to compact.
 export const SUBAGENT_ANSWER = 'Refused: only the main conversation can ask for a compaction. Tell the agent that started you instead.'
 
+// What a session is told when it takes its request back.
+export const withdrawAnswer = (hadRequest: boolean): string =>
+  hadRequest ? 'The request for a compaction is withdrawn: nothing will be asked and nothing compacted on its account.' : 'There was no request for a compaction to withdraw.'
+
 // What the session's tool answers, for Claude to read.
 export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number): string => {
   if (mode === 'off' || !isEnabled) {

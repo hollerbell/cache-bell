@@ -46,7 +46,7 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0 }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '' }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size = 100): Seen => {
@@ -69,6 +69,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   answers.rows = {}
   answers.sets = []
   answers.looked = 0
+  answers.draft = ''
   // `answers.rows` are the plugin's own rows of /config, by key; a row named "locked" refuses a change.
   on('config.list', (() => ({
     value: [
@@ -176,6 +177,8 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     if (answers.isListBroken) throw new Error('no agents on this surface')
     return { value: answers.agents.map((status, at) => ({ id: `agent-${at}`, description: 'a subagent', type: 'general-purpose', status })) }
   })
+  // What the prompt box holds: `answers.draft`.
+  on('prompt.read', () => ({ value: { text: answers.draft, cursor: answers.draft.length } }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.step', async function* ($, e) {
     yield { kind: 'text', index: 0, text: 'ok' }
@@ -1417,7 +1420,7 @@ test('what the session asked for and a subagent held back is done after the turn
 
   // The subagent is done: its result starts a turn of the session, and the compaction follows that turn.
   answers.agents = ['completed']
-  await $.prompt.submit({ text: 'task result', wait: false, origin: { kind: 'task' } } as never)
+  await $.prompt.submit({ text: 'task result', wait: false, origin: { kind: 'task-notification' } } as never)
   await turn($, clock, 0, undefined, false)
   await clock.advance(2 * S)
   expect(seen.did.length).toBe(2)
@@ -1610,6 +1613,131 @@ test('/bell reset puts back the options that differ from their defaults, and onl
   expect((await run($, 'reset')).text).toBe('Put back to the default: enabled, mode, compactCountdown.\nNot changed, Claude Code refused: ttl.')
   expect(answers.sets).toEqual(['cache-bell.enabled=true', 'cache-bell.mode=prepare-compact', 'cache-bell.compactCountdown=30'])
   expect(answers.rows['other-plugin.mode']).toBe('keep')
+})
+
+// A turn another session's message starts: its prompt comes in with an origin that is not the person's.
+const otherTurn = async ($: Engine, clock: Clock, lastsMs: number) => {
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await turn($, clock, lastsMs, undefined, false)
+}
+
+test('a message from another session only interrupts the question about what Claude asked for', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
+
+  // Ten seconds in, another session writes: the question goes for the length of that turn.
+  await clock.advance(10 * S)
+  await otherTurn($, clock, 5 * S)
+  await clock.settle()
+  expect(seen.did).toEqual([])
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:20')
+
+  // Nobody answers: the compaction runs, and the log still says what the session gave as its reason.
+  await clock.advance(21 * S)
+  expect(seen.did.length).toBe(1)
+  expect(seen.did[0]).toMatch(/^compact\[/)
+  expect(logged(seen)).toMatchObject([{ why: 'session', by: 'timer', note: 'the task is done' }])
+})
+
+test('a choice the person typed is still selected when the interrupted question comes back', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  // The person types 2 (Not now) and does not press Enter.
+  await edit($, '', 0, 0, '2')
+  answers.draft = '2'
+  expect((await question($)).selected).toEqual(['[2] >Not now<'])
+  await clock.advance(10 * S)
+  await otherTurn($, clock, 5 * S)
+  await clock.settle()
+  expect(await question($)).toMatchObject({ selected: ['[2] >Not now<'], note: '[Enter] confirms · no answer: Not now in 0:20' })
+  await clock.advance(30 * S)
+  expect(seen.did).toEqual([])
+})
+
+test('a turn whose origin nobody stated drops what the session asked for', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await clock.advance(10 * S)
+  await turn($, clock, 5 * S, undefined, false)
+  await clock.settle()
+  expect(await bandText($)).not.toMatch(/asked for a compaction/)
+  await clock.advance(60 * S)
+  expect(seen.did).toEqual([])
+})
+
+test('that the user asked is taken only in a turn the user started', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  // Another session's message starts the turn; the session claims the user asked.
+  await $.prompt.submit({ text: 'finish and compact', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'finish and compact', turnId: 'p' })
+  const stream = $.turn.step({ turnId: 'p', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'asked', userAsked: true } as never)) as { result?: unknown }
+  expect(String(called.result)).toMatch(/has up to 30 seconds to cancel/)
+  await $.turn.complete({ turnId: 'p', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
+})
+
+test('the session takes its request back with cancel, and nothing is asked', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await clock.advance(10 * S)
+  // The turn another session's message started: the request is carried into it, and taken back there.
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'a message from another session', turnId: 'o' })
+  const stream = $.turn.step({ turnId: 'o', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  const taken = (await $.tool.call({ tool: 'mcp__cache-bell__compact', cancel: true } as never)) as { result?: unknown }
+  expect(String(taken.result)).toBe('The request for a compaction is withdrawn: nothing will be asked and nothing compacted on its account.')
+  const none = (await $.tool.call({ tool: 'mcp__cache-bell__compact', cancel: true } as never)) as { result?: unknown }
+  expect(String(none.result)).toBe('There was no request for a compaction to withdraw.')
+  await $.turn.complete({ turnId: 'o', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect(await bandText($)).not.toMatch(/asked for a compaction/)
+  await clock.advance(60 * S)
+  expect(seen.did).toEqual([])
+  expect(logged(seen)).toEqual([])
+})
+
+test('what the user asked the session for is compacted after three seconds', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.prompt.submit({ text: 'finish this and compact', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'finish this and compact', turnId: 't' })
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'you asked', userAsked: true, countdown: 120 } as never)) as { result?: unknown }
+  expect(String(called.result)).toMatch(/has up to 3 seconds to cancel/)
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:03')
+  await clock.advance(2 * S)
+  expect(seen.did).toEqual([])
+  await clock.advance(2 * S)
+  expect(seen.did.length).toBe(1)
+  expect(seen.did[0]).toMatch(/^compact\[/)
 })
 
 test('a subagent cannot ask for the compaction of the main conversation', async ($, on) => {

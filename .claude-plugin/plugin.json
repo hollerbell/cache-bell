@@ -1,6 +1,6 @@
 {
   "name": "cache-bell",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation.",
   "author": {
     "name": "FEO digital agency s.r.o."

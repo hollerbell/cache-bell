@@ -11,8 +11,10 @@ export type Observation =
   // gapMs: how long since the previous tick; a long gap means the machine slept
   // hold: what stands in the way of a compaction right now (left out = nothing)
   | { kind: 'tick'; gapMs: number; hold?: Hold | null }
-  // by: who started the turn. Only a person's turn counts as work; the plugin's own is its announcement.
-  | { kind: 'turn-start'; by: 'person' | 'self' | 'other' }
+  // by: who started the turn. Only a person's turn counts as work; the plugin's own is its announcement;
+  // 'other' is known to be somebody else's (another session, a background task), 'unknown' is a turn whose
+  // origin nobody stated.
+  | { kind: 'turn-start'; by: 'person' | 'self' | 'other' | 'unknown' }
   | { kind: 'request'; sentAt: number }
   // isAborted: the turn was interrupted or ended in an error instead of an answer
   // isFailed: it ended in an error, so its last request may never have reached the cache
@@ -30,6 +32,8 @@ export type Observation =
   // the session asked for a compaction, in the turn that is running
   // countdownMs: how long the session wants the person to have to cancel; left out = the option's
   | { kind: 'requested'; countdownMs?: number | null }
+  // the session takes back what it asked for earlier
+  | { kind: 'withdrawn' }
   // the shell could not carry out a step (the announcement did not get through)
   | { kind: 'refused'; reason: string }
   | { kind: 'ttl'; ttlMs: number; source: 'transcript' | 'settings' }

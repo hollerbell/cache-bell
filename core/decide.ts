@@ -132,6 +132,10 @@ const waitUntil = (state: State, now: number, config: Config): number | null => 
 
 export const TOO_SOON = 'The session asked for a compaction, but the prompt cache runs out too soon to ask you: nothing was compacted.'
 
+// A question about the session's request that something else interrupted comes back with the time it had
+// left, and with this much at the least: enough to read it again and say no.
+export const RESUMED_MIN_MS = 10 * 1000
+
 // A renewal that got no answer is tried once more, this much later: a network that was away for a moment
 // should not cost the cache, and an API that keeps refusing should not be asked every second.
 export const RETRY_AFTER_MS = 15 * 1000
@@ -290,9 +294,20 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       // message renews the cache but does not reset what was asked and how often it was renewed.
       // A compaction that waits for a subagent outlasts the turn its result comes back in.
       const fresh = observation.by === 'person' ? { ...FRESH, ...UNHELD, workedAt: now } : {}
+      // A turn known to be somebody else's (another session's message, a background task's result)
+      // interrupts an open question without answering it. What the session asked for is kept, with the time
+      // its countdown had left, and asked about again when that turn ends; a question about the cache is
+      // simply not counted as asked. The person's own message drops the request, and so does a turn whose
+      // origin is not known: it may be theirs.
+      const isInterrupted = state.phase === 'ASKING' && observation.by === 'other'
+      const kept =
+        isInterrupted && state.askReason === 'session'
+          ? { isRequested: true, requestMs: Math.max((state.askDeadline ?? now) - now, RESUMED_MIN_MS) }
+          : { isRequested: false, requestMs: null }
+      const unasked = isInterrupted && state.askReason === 'cache' ? { isAsked: false } : {}
       // Working on past an extension's question is an answer too, and the extension's to read.
       const passed = isExtensions(state) && observation.by === 'person' ? { ext: extension.passedOver(state) } : {}
-      return { state: { ...state, ...fresh, ...passed, ...UNASKED, isOrdered: false, isRequested: false, lastCompaction: null, phase: 'BUSY', resumeTo }, actions: [...close, ...redraw] }
+      return { state: { ...state, ...fresh, ...passed, ...unasked, ...UNASKED, ...kept, isOrdered: false, lastCompaction: null, phase: 'BUSY', resumeTo }, actions: [...close, ...redraw] }
     }
 
     case 'request': {
@@ -383,6 +398,11 @@ const step = (state: State, now: number, observation: Observation, config: Confi
         ? { state: { ...state, isRequested: true, requestMs: observation.countdownMs ?? null }, actions: [] }
         : { state, actions: [] }
 
+    // Taken back: nothing is asked and nothing compacted on its account, a compaction that waits included.
+    case 'withdrawn':
+      if (!state.isRequested && state.held === null) return { state, actions: [] }
+      return { state: { ...state, isRequested: false, requestMs: null, held: null }, actions: state.held === null ? [] : redraw }
+
     case 'compact-failed':
       return state.phase === 'COMPACTING' ? cold(state, 'compact-failed') : { state, actions: [] }
 
@@ -417,7 +437,7 @@ const step = (state: State, now: number, observation: Observation, config: Confi
     case 'compacted': {
       // After a compaction the cached prefix is the old conversation: nothing here is worth keeping warm
       // until real work resumes. One that ran inside a turn leaves the turn running.
-      const compacted = { ...state, ...FRESH, ...UNASKED, ...UNHELD, isRequested: false, anchorAt: null, coldReason: null, contextTokens: null, ext: extension.reset(state.ext, 'compacted') }
+      const compacted = { ...state, ...FRESH, ...UNASKED, ...UNHELD, isRequested: false, requestMs: null, anchorAt: null, coldReason: null, contextTokens: null, ext: extension.reset(state.ext, 'compacted') }
       if (state.phase === 'BUSY') return { state: { ...compacted, resumeTo: 'DORMANT' }, actions: redraw }
       // The plugin's own compaction is said in the band until the next turn: who comes back sees what was done.
       const own = observation.own
@@ -427,7 +447,7 @@ const step = (state: State, now: number, observation: Observation, config: Confi
 
     case 'cleared':
       return {
-        state: { ...state, ...FRESH, ...UNASKED, ...UNHELD, lastCompaction: null, phase: 'UNKNOWN', anchorAt: null, coldReason: null, resumeTo: null, contextTokens: null, ext: extension.reset(state.ext, 'cleared'), isRequested: false },
+        state: { ...state, ...FRESH, ...UNASKED, ...UNHELD, lastCompaction: null, phase: 'UNKNOWN', anchorAt: null, coldReason: null, resumeTo: null, contextTokens: null, ext: extension.reset(state.ext, 'cleared'), isRequested: false, requestMs: null },
         actions: [...close, ...redraw],
       }
   }

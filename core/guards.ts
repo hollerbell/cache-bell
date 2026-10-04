@@ -38,8 +38,14 @@ export const holdOf = (sinceEditMs: number | null, agents: readonly { status: st
 export const COUNTDOWN_MIN_S = 10
 export const COUNTDOWN_MAX_S = 600
 
+// The countdown of a compaction the user themselves asked the session for: they have decided already, so
+// the question is up just long enough to be seen, and to be stopped should the session have got it wrong.
+export const USER_ASKED_MS = 3 * 1000
+
 // What the session passed as `countdown`, in ms within those bounds; null when it passed none, or no number.
-export const countdownOf = (value: unknown): number | null => {
+// A request the user asked for takes the short countdown, whatever else was passed.
+export const countdownOf = (value: unknown, isUserAsked: unknown = false): number | null => {
+  if (isUserAsked === true) return USER_ASKED_MS
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   return Math.min(Math.max(Math.round(value), COUNTDOWN_MIN_S), COUNTDOWN_MAX_S) * 1000
 }

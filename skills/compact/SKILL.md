@@ -15,7 +15,7 @@ compacted while you are still working.
   of it, and nothing is in progress, call the tool. The plugin asks the user and compacts when the
   countdown ends, unless they cancel.
 - The user asked for it ("compact when you are done", "wrap up and compact"): call the tool when the work
-  is done.
+  is done, with `userAsked: true`. They have decided already, so the countdown is three seconds.
 - The user's own rules come first, in either direction. "Compact after every finished task" gives you more
   freedom; "only suggest it" means you say in one sentence that this would be a good moment, and call the
   tool once they agree.
@@ -31,6 +31,10 @@ compacted while you are still working.
    their answer, or whether its settings do not allow a session to ask at all. If it was refused, tell the
    user and carry on.
 4. End the turn and call no more tools.
+
+If a message from another session or a background task's result arrives while the user is being asked, the
+question comes back when that turn ends. If that message gave you work that is not finished, take your
+request back: call the tool with `cancel: true`, and ask again when the work is done.
 
 The user answers in the band above the prompt: they may cancel, or, where the plugin waits for them,
 confirm. If nothing is compacted, you simply continue with their next message.

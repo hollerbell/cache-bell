@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, whyText } from '../core/ask'
+import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, whyText, withdrawAnswer } from '../core/ask'
 import type { AskStyle, Choice, ChoiceText } from '../core/ask'
 import { OPTION_DEFAULTS, resetReport, resolveConfig } from '../core/config'
 import { decide, fallbackOf, initialState, needsHold } from '../core/decide'
@@ -47,9 +47,15 @@ let look: Look = 'dark'
 let queue: Promise<void> = Promise.resolve()
 
 // Who started the turn that is about to begin, as its prompt.submit said: the plugin's own announcement,
-// the person, or something else (a background task, another session). A turn no prompt.submit came before
-// is not known to be the person's: only their own turn starts the count of renewals over.
-let nextTurnBy: 'person' | 'self' | 'other' = 'other'
+// the person, or somebody else (a background task, another session). A turn no prompt.submit came before,
+// or one whose origin says nothing, is unknown: it does not start the count of renewals over as the
+// person's does, and it does not carry a question over as somebody else's does.
+type TurnBy = 'person' | 'self' | 'other' | 'unknown'
+let nextTurnBy: TurnBy = 'unknown'
+// Who started the turn that is running.
+let turnBy: TurnBy = 'unknown'
+// The origins of a prompt that are known not to be the person.
+const OTHERS = ['task-notification', 'scheduled-trigger', 'peer', 'plugin']
 
 // Why the plugin's next compaction comes and who decided, kept from the question or the request to the
 // compaction itself; `note` is what the session said when it asked. A compaction the plugin runs is logged
@@ -276,9 +282,12 @@ const DEMO: Pick<Question, 'isSticky' | 'fallback' | 'answer' | 'choices' | 'why
 
 const openQuestion = async ($: EngineInterface, asked: Omit<Question, 'startedAt' | 'selected' | 'isTyped'>) => {
   const startedAt = await $.clock.now()
+  // A digit already in the prompt box is the person's choice: a question that comes back (after another
+  // session's turn, after a reload) must not forget it.
+  const typed = choiceOfDigit(asked.choices, (await $.prompt.read()).text)
   // Nothing is awaited from here on, so two questions opened at once leave one timer.
   blinker?.cancel()
-  question = { ...asked, startedAt, selected: asked.fallback, isTyped: false }
+  question = { ...asked, startedAt, selected: typed ?? asked.fallback, isTyped: typed !== null }
   blinker = $.clock.every(FRAME_MS, () => void blink($))
   $.ui.invalidate('ui.render')
 }
@@ -328,7 +337,7 @@ const prepare = async ($: EngineInterface, config: Config) => {
   } catch (err) {
     $.ui.log(`announcement not sent: ${String(err)}`)
   }
-  nextTurnBy = 'other'
+  nextTurnBy = 'unknown'
   await observe($, config, { kind: 'refused', reason: NOT_ANNOUNCED })
 }
 
@@ -542,6 +551,8 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
         properties: {
           reason: { type: 'string', description: 'One short sentence: why now. Kept in the log of compactions.' },
           countdown: { type: 'number', description: `Seconds the user gets to cancel, ${COUNTDOWN_MIN_S} to ${COUNTDOWN_MAX_S}. Leave it out to use the user's own setting.` },
+          userAsked: { type: 'boolean', description: 'true only when the user themselves asked you, in this conversation, to compact: the countdown is then three seconds.' },
+          cancel: { type: 'boolean', description: 'true takes back a request you made earlier, with its countdown. Nothing else is done.' },
         },
       },
     })
@@ -677,13 +688,29 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('tool.call', { tool: 'mcp__cache-bell__compact' }, async ($, e) => {
     if (isYielding) return { result: YIELDED_ANSWER }
     if ((e as { agentId?: string }).agentId !== undefined) return { result: SUBAGENT_ANSWER }
+    // The session takes back what it asked for earlier: a request an interrupted question carried over.
+    if ((e as { cancel?: unknown }).cancel === true) {
+      await queue
+      const kept = await read($, machine)
+      const hadRequest = kept !== null && (kept.isRequested || kept.held !== null)
+      if (hadRequest) {
+        cause = OWN_CAUSE
+        note = ''
+        await observe($, config, { kind: 'withdrawn' })
+      }
+      return { result: withdrawAnswer(hadRequest) }
+    }
     const isAllowed = isWatching && config.enabled && config.sessionCompact !== 'off'
-    const countdownMs = countdownOf((e as { countdown?: unknown }).countdown)
+    const asked = e as { countdown?: unknown; userAsked?: unknown }
+    // That the user asked is the session's word: it is taken only in a turn the user started.
+    const countdownMs = countdownOf(asked.countdown, asked.userAsked === true && turnBy === 'person')
     if (isAllowed) {
       // Only a request the core takes up explains a compaction: one made while the plugin's own
       // announcement runs changes nothing.
       const reason = (e as { reason?: unknown }).reason
-      if ((await read($, machine))?.phase === 'BUSY') {
+      const current = await read($, machine)
+      // A request already carried over keeps what was said with it.
+      if (current?.phase === 'BUSY' && !current.isRequested) {
         cause = { why: 'session', by: 'plugin' }
         note = typeof reason === 'string' ? reason : ''
       }
@@ -722,8 +749,11 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     // The announcement waits for the session to be idle. When work got in first, the compaction it
     // announces is off, and so is the announcement.
     if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return { drop: `${PLUGIN}: ${OVERTAKEN}` }
-    nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : 'other'
+    nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
     if (isPerson) void dismissIntro($)
+    // The person's message, also one sent into a turn that is running, takes back what the session asked
+    // for and what waits: they are at work.
+    if (isPerson && (question === null || choiceOfDigit(question.choices, e.text.trim()) === null)) void observe($, config, { kind: 'withdrawn' })
     if (question === null || e.origin.kind === 'plugin') return next(e)
     const typed = choiceOfDigit(question.choices, e.text.trim())
     if (typed === null) {
@@ -762,10 +792,14 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('turn.start', async ($, e, next) => {
     ensureStarted($, config)
     const by = nextTurnBy
-    nextTurnBy = 'other'
+    nextTurnBy = 'unknown'
+    turnBy = by
     // Work that is not the plugin's own announcement: what was asked before no longer explains a compaction.
     // Only a compaction that waits for a subagent keeps its cause through the turn that brings the result.
-    if (by === 'person' || (by === 'other' && ((await read($, machine))?.held ?? null) === null)) {
+    // So does the session's request that an interrupted question carries over.
+    const before = await read($, machine)
+    const isCarried = before !== null && (before.held !== null || (before.phase === 'ASKING' && before.askReason === 'session'))
+    if (by === 'person' || (by !== 'self' && !isCarried)) {
       cause = OWN_CAUSE
       note = ''
     }
@@ -786,6 +820,13 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     const result = await next(e)
     if (isWatching && e.agentId === undefined) {
       await observe($, config, { kind: 'turn-complete', contextTokens: (await sizeNow($)) ?? undefined, isAborted: e.isAborted || e.reason !== 'answer', isFailed: e.reason === 'error', hold: await holdNow($, await read($, machine)) })
+      // What explained a compaction is forgotten once nothing is left for it to explain: no question, no
+      // step of the plugin's own, nothing waiting.
+      const after = await read($, machine)
+      if (after !== null && after.phase !== 'ASKING' && after.phase !== 'PREPARING' && after.phase !== 'COMPACTING' && after.held === null) {
+        cause = OWN_CAUSE
+        note = ''
+      }
     }
     return result
   })

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { resolveConfig } from '../../core/config'
-import { ASK_GRACE_MS, CALLED_OFF, LATE_MARGIN_MS, RENEW_FAILED, RETRY_AFTER_MS, TOO_SOON, WORK_GRACE_MS, canRenew, decide, defaultChoice, initialState, planOf } from '../../core/decide'
+import { ASK_GRACE_MS, CALLED_OFF, LATE_MARGIN_MS, RENEW_FAILED, RESUMED_MIN_MS, RETRY_AFTER_MS, TOO_SOON, WORK_GRACE_MS, canRenew, decide, defaultChoice, initialState, planOf } from '../../core/decide'
 import { countdownOf, fillInstructions, isCacheHit } from '../../core/guards'
 import { TTL_1H } from '../../core/timing'
 import type { Action, Config, Observation, State } from '../../core/types'
@@ -567,6 +567,9 @@ test('a session may name the countdown of its request, within bounds', () => {
     [45.4, 45 * S],
   ]
   for (const [passed, ms] of table) expect({ passed, ms: countdownOf(passed) }).toEqual({ passed, ms })
+  // What the user themselves asked for takes three seconds, whatever countdown came with it; only `true` counts.
+  expect([countdownOf(undefined, true), countdownOf(300, true)]).toEqual([3 * S, 3 * S])
+  expect([countdownOf(60, false), countdownOf(60, 'yes'), countdownOf(undefined, 1)]).toEqual([60 * S, 60 * S, null])
 
   // The session's own countdown is used for its question; without one, the option's 20 seconds.
   const own = decide(working(), T0 + S, { kind: 'requested', countdownMs: 60 * S }, base).state
@@ -657,4 +660,67 @@ test('no more than three renewal requests go out in one idle period, answered or
   // A state kept by a version that did not count requests: what was renewed was sent.
   const { renewalsSent: _, ...old } = warm({ renewals: 2 })
   expect(decide(old as State, T0 + S, tick, keep).state.renewalsSent).toBe(2)
+})
+
+test('a turn the person did not start interrupts a question about the session\'s request, and it comes back', () => {
+  // Asked at 0:05 with 30 seconds to cancel; another session's message arrives at 0:15.
+  const asking = warm({ phase: 'ASKING', askReason: 'session', askDeadline: T0 + 35 * S })
+  for (const by of ['other'] as const) {
+    const interrupted = decide(asking, T0 + 15 * S, { kind: 'turn-start', by }, base)
+    expect(interrupted.state).toMatchObject({ phase: 'BUSY', isRequested: true, requestMs: 20 * S, askReason: null, askDeadline: null })
+    expect(kinds(interrupted.actions)).toEqual(['close-question', 'redraw'])
+    // That turn sends its request and ends at 0:25: the question is back, with the 20 seconds it had left.
+    const again = run(interrupted.state, [[T0 + 16 * S, { kind: 'request', sentAt: T0 + 16 * S }]])
+    const back = decide(again, T0 + 25 * S, done(150000), base)
+    expect(back.state).toMatchObject({ phase: 'ASKING', askReason: 'session', askDeadline: T0 + 45 * S, isRequested: false })
+    expect(back.actions[0]).toEqual({ kind: 'ask', reason: 'session', deadline: T0 + 45 * S, selected: 'compact' })
+  }
+  // With next to nothing left it gets ten seconds: enough to read it again and say no.
+  expect(RESUMED_MIN_MS).toBe(10 * S)
+  expect(decide(asking, T0 + 34 * S, { kind: 'turn-start', by: 'other' }, base).state.requestMs).toBe(10 * S)
+  expect(decide(asking, T0 + 40 * S, { kind: 'turn-start', by: 'other' }, base).state.requestMs).toBe(10 * S)
+  // The person's own message drops the request, as before, and so does a turn nobody is known to have sent.
+  for (const by of ['person', 'unknown', 'self'] as const) {
+    expect({ by, state: decide(asking, T0 + 15 * S, { kind: 'turn-start', by }, base).state }).toMatchObject({ by, state: { phase: 'BUSY', isRequested: false, requestMs: null } })
+  }
+  // Interrupted twice: each time it comes back with what was left, ten seconds at the least.
+  const once = decide(run(decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, base).state, [[T0 + 16 * S, { kind: 'request', sentAt: T0 + 16 * S }]]), T0 + 25 * S, done(150000), base).state
+  const twice = decide(once, T0 + 40 * S, { kind: 'turn-start', by: 'other' }, base).state
+  expect(twice).toMatchObject({ isRequested: true, requestMs: 10 * S })
+  // A second request in the turn that carries one changes nothing: not the countdown either.
+  expect(decide(twice, T0 + 41 * S, { kind: 'requested', countdownMs: 500 * S }, base).state).toBe(twice)
+  // The person interrupts the turn that came in between: the request goes with it.
+  const carried = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, base).state
+  expect(decide(carried, T0 + 20 * S, { kind: 'turn-complete', isAborted: true }, base).state).toMatchObject({ phase: 'WARM', isRequested: false })
+  // Set to wait, the question comes back too, and still only the person compacts.
+  const wait = resolveConfig({ sessionCompact: 'wait' })
+  const waiting = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, wait).state
+  const waited = decide(run(waiting, [[T0 + 16 * S, { kind: 'request', sentAt: T0 + 16 * S }]], wait), T0 + 25 * S, done(150000), wait)
+  expect(waited.actions[0]).toMatchObject({ kind: 'ask', reason: 'session', selected: 'skip' })
+})
+
+test('a question about the cache that another turn interrupted is not counted as asked', () => {
+  const asking = warm({ phase: 'ASKING', isAsked: true, askReason: 'cache', askDeadline: ACT })
+  expect(decide(asking, ASK + 5 * S, { kind: 'turn-start', by: 'other' }, base).state).toMatchObject({ phase: 'BUSY', isAsked: false, isRequested: false })
+  expect(decide(asking, ASK + 5 * S, { kind: 'turn-start', by: 'unknown' }, base).state).toMatchObject({ phase: 'BUSY', isAsked: true })
+  // An extension's question, and a turn outside any question, change nothing here.
+  expect(decide(warm({ isAsked: true }), ASK, { kind: 'turn-start', by: 'other' }, base).state.isAsked).toBe(true)
+  expect(decide({ ...asking, askReason: 'toy' }, ASK, { kind: 'turn-start', by: 'other' }, base).state).toMatchObject({ isAsked: true, isRequested: false })
+})
+
+test('the session can take its request back', () => {
+  const requested = decide(working(), T0 + S, { kind: 'requested', countdownMs: 60 * S }, base).state
+  const withdrawn = decide(requested, T0 + 2 * S, { kind: 'withdrawn' }, base)
+  expect(withdrawn.state).toMatchObject({ phase: 'BUSY', isRequested: false, requestMs: null })
+  expect(withdrawn.actions).toEqual([])
+  // The turn ends with nothing to ask about.
+  expect(decide(withdrawn.state, T0 + 5 * S, done(150000), base).state.phase).toBe('WARM')
+  // With no request there is nothing to take back, and the state is left as it is.
+  const idle = working()
+  expect(decide(idle, T0 + S, { kind: 'withdrawn' }, base).state).toBe(idle)
+  // A compaction that waits for a subagent is taken back too: it does not run once the way is clear.
+  const waiting = working({ held: { by: 'agent', isTold: true } })
+  const dropped = decide(waiting, T0 + S, { kind: 'withdrawn' }, base)
+  expect(dropped.state).toMatchObject({ held: null, isRequested: false })
+  expect(kinds(dropped.actions)).toEqual(['redraw'])
 })

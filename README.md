@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.1](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 221 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.2](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 230 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.1, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.2, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -137,6 +137,9 @@ A light theme gets darker colours.
   to the model.
 - A click on a choice does it at once.
 - Any other message you send closes the question: your turn renews the cache anyway.
+- A message from another session, or a background task's result, only interrupts the question: when that
+  turn ends, a compaction Claude asked for is offered again, with the time the countdown had left and at
+  least ten seconds. A digit you had typed still selects its choice.
 - While a question is open, a message that is exactly one of its digits answers the question, even if
   Claude has just asked you to pick "1 or 2". Write more than the digit to answer Claude.
 
@@ -168,6 +171,7 @@ A conversation below 100 000 tokens is left alone: the plugin only shows the cou
 Claude itself may also ask for a compaction once its work is done: the skill `compact` tells it when, and
 it asks through the plugin's tool `compact`. You get 30 seconds to cancel, or the time Claude asked for
 (10 to 600 seconds; less when the cache runs out sooner); without an answer the conversation is compacted.
+When you ask Claude for the compaction yourself, in your own message, the countdown is three seconds.
 When to ask is yours to say, for example "compact after every finished task" or "only suggest it". With
 `cache-bell.sessionCompact` = `wait` nothing is compacted unless you say `Compact`; with `auto` it
 compacts without the countdown.
@@ -339,7 +343,7 @@ claude plugin update cache-bell@cache-bell
 (fast-forward only) and refreshes the marketplace and the plugin.
 
 Then run `/reload-plugins` in every session that is open; new sessions have the new version.
-`/bell status` says which version runs.
+`/bell status` says which version runs, and [CHANGELOG.md](CHANGELOG.md) what changed in it.
 
 ## Remove
 
