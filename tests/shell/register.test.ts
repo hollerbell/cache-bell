@@ -1723,6 +1723,8 @@ test('what the user asked the session for is compacted after three seconds', asy
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
+  // The person types the message and sends it: that typing is over, and holds nothing back.
+  await key($)
   await $.prompt.submit({ text: 'finish this and compact', wait: false, origin: { kind: 'composer' } })
   await $.turn.start({ text: 'finish this and compact', turnId: 't' })
   const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1 })

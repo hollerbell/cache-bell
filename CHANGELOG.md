@@ -2,6 +2,12 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.3
+
+- Typing the message that asks for a compaction no longer holds that compaction back: once a message is
+  sent, the typing that wrote it is over. Before, a compaction asked for within a minute of your last key
+  waited for you "to finish typing", and your next message dropped it.
+
 ## 0.2.2
 
 - A message from another session, or a background task's result, no longer drops a compaction Claude asked

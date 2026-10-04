@@ -751,6 +751,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return { drop: `${PLUGIN}: ${OVERTAKEN}` }
     nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
     if (isPerson) void dismissIntro($)
+    // The message is sent: the typing that wrote it is over, and must not hold back what the message asks for.
+    if (isPerson) lastEditAt = null
     // The person's message, also one sent into a turn that is running, takes back what the session asked
     // for and what waits: they are at work.
     if (isPerson && (question === null || choiceOfDigit(question.choices, e.text.trim()) === null)) void observe($, config, { kind: 'withdrawn' })
