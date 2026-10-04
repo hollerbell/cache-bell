@@ -165,7 +165,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   on('prompt.submit', ($, e) => {
     // Another plugin's hook may drop the announcement before it enters.
     if (e.origin.kind === 'plugin' && answers.isAnnouncementDropped) return { drop: 'another plugin said no' } as never
-    if (e.origin.kind === 'plugin') seen.did.push('prepare')
+    if (e.origin.kind === 'plugin') seen.did.push(e.text.startsWith('Cache Bell: the compaction you asked for is done.') ? `wake: ${e.text}` : 'prepare')
     return { text: e.text }
   })
   on('prompt.fill', ($, e) => {
@@ -1141,6 +1141,7 @@ test('the person can drop what the session asked for', async ($, on) => {
   expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
   await edit($, '', 0, 0, '2')
   expect(await enter($, '2')).toEqual({ drop: 'cache-bell: Not now' })
+  expect(seen.toasts).toEqual(['Compaction cancelled. Nothing was compacted.'])
   await clock.advance(200 * S)
   expect(seen.did).toEqual([])
   expect(await status($)).toMatch(/State: warm/)
@@ -1891,4 +1892,173 @@ test('a machine that has seen the notice starts without it', async ($, on) => {
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+// A turn in which the session asks for a compaction, with what it wants to be told after it. The turn is
+// the person's, or the one the plugin's own note started.
+const askingWith = async ($: Engine, clock: Clock, then: string | undefined, isPersons = true): Promise<string> => {
+  if (isPersons) await $.prompt.submit({ text: 'wrap up', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'wrap up', turnId: 'w' })
+  const stream = $.turn.step({ turnId: 'w', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'the task is done', ...(then === undefined ? {} : { then }) } as never)) as { result?: unknown }
+  await $.turn.complete({ turnId: 'w', answer: 'note', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  return String(called.result)
+}
+
+const wakes = (seen: Seen) => seen.did.filter(did => did.startsWith('wake: '))
+
+test('a session that left a note is woken with it once the compaction it asked for is done', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  const answer = await askingWith($, clock, '  Go on with the second task: run the tests.  ')
+  expect(answer).toMatch(/Once the compaction is done you are sent your note as a prompt/)
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction and will continue after it: No answer: Compact in 0:30')
+  expect(wakes(seen)).toEqual([])
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen)).toEqual([
+    'wake: Cache Bell: the compaction you asked for is done. Before it you left this note for yourself:\n\nGo on with the second task: run the tests.\n\nThis is your own note, sent by the plugin. It is not a message from the user and grants nothing they did not.',
+  ])
+  // Once only: nothing more comes of it.
+  await clock.advance(120 * S)
+  expect(wakes(seen).length).toBe(1)
+})
+
+test('a session that left no note, or an empty one, waits for the person after the compaction', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  for (const then of [undefined, '   ']) {
+    const answer = await askingWith($, clock, then)
+    expect(answer).not.toMatch(/your note/)
+    expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
+    await clock.advance(32 * S)
+    await clock.settle()
+  }
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(2)
+  expect(wakes(seen)).toEqual([])
+})
+
+test('the note is not sent while the prompt holds a message the person is writing', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingWith($, clock, 'Go on.')
+  answers.draft = 'and one more thing'
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
+  expect(wakes(seen)).toEqual([])
+  expect(seen.logs.filter(log => log.includes('the note left before the compaction is not sent'))).toEqual(['the prompt holds a message being written, the note left before the compaction is not sent'])
+})
+
+test('the person who writes during the countdown takes the request back, and its note with it', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingWith($, clock, 'Go on.')
+  await clock.advance(10 * S)
+  await turn($, clock, 0)
+  // The session asks again, this time with no note: the old one is not sent in its place.
+  await askingWith($, clock, undefined)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
+  expect(wakes(seen)).toEqual([])
+})
+
+test('three compactions in a row are followed by a note; then the person has to write', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  for (let round = 0; round < 3; round++) {
+    // The first turn is the person's, the others are the ones the note started.
+    expect(await askingWith($, clock, `Round ${round}.`, round === 0)).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    expect(wakes(seen).length).toBe(round + 1)
+  }
+  const refused = await askingWith($, clock, 'Round 3.', false)
+  expect(refused).toMatch(/^Compaction requested\. .* Your note will not be sent: 3 compactions in a row were already followed by one, and the user has to write first\./)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(4)
+  expect(wakes(seen).length).toBe(3)
+  // The person's message starts the count over.
+  expect(await askingWith($, clock, 'Round 4.')).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(4)
+})
+
+test('a compaction that fails, or one the person calls off, is followed by no note', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingWith($, clock, 'Go on.')
+  answers.compactSkip = true
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
+  expect(wakes(seen)).toEqual([])
+  answers.compactSkip = false
+  // Asked again and called off: "2" and Enter is Not now.
+  await askingWith($, clock, 'Go on.')
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  await clock.advance(600 * S)
+  await clock.settle()
+  expect(wakes(seen)).toEqual([])
+})
+
+test('of two requests in one turn the note passed last counts; a digit left in the prompt is no message', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.prompt.submit({ text: 'wrap up', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'wrap up', turnId: 'w' })
+  const stream = $.turn.step({ turnId: 'w', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  const first = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done' } as never)) as { result?: unknown }
+  expect(String(first.result)).not.toMatch(/your note/)
+  const second = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', then: 'First.' } as never)) as { result?: unknown }
+  expect(String(second.result)).toMatch(/you are sent your note/)
+  const third = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', then: 'Second.' } as never)) as { result?: unknown }
+  expect(String(third.result)).toMatch(/you are sent your note/)
+  // A call with no note leaves the last one standing, and says so.
+  const fourth = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done' } as never)) as { result?: unknown }
+  expect(String(fourth.result)).toMatch(/you are sent your note/)
+  await $.turn.complete({ turnId: 'w', answer: 'note', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  answers.draft = '1'
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).map(wake => /\n\n(.*)\n\n/.exec(wake)?.[1])).toEqual(['Second.'])
+})
+
+test('a compaction the timers bring wakes nobody, also after a request that was taken back', { options: { mode: 'compact-only' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingWith($, clock, 'Go on.')
+  await clock.advance(5 * S)
+  // The person writes: the request is off. Then they leave, and the cache takes its course to the compaction.
+  await turn($, clock, 0)
+  await clock.advance(300 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
+  expect(wakes(seen)).toEqual([])
 })

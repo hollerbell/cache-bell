@@ -82,6 +82,11 @@ export const CHOICES: Record<OwnChoice, ChoiceText> = {
   skip: { label: 'Not now' },
 }
 
+// What is said once a compaction the session asked for is called off: the question is gone from the band,
+// and a choice made by mistake would otherwise leave nothing to see.
+export const skippedNotice = (isTimers: boolean): string =>
+  isTimers ? 'No answer: nothing was compacted.' : 'Compaction cancelled. Nothing was compacted.'
+
 // The choices each of the core's reasons offers, in the order of their digits: the first is 1.
 export const CHOICES_OF: Record<'cache' | 'session', readonly Choice[]> = {
   cache: ['compact', 'renew', 'cancel'],
@@ -167,8 +172,39 @@ export const SUBAGENT_ANSWER = 'Refused: only the main conversation can ask for 
 export const withdrawAnswer = (hadRequest: boolean): string =>
   hadRequest ? 'The request for a compaction is withdrawn: nothing will be asked and nothing compacted on its account.' : 'There was no request for a compaction to withdraw.'
 
+// A compaction the session asked for leaves it idle: nothing wakes it but a prompt. With its request the
+// session may say what it wants to be told once the compaction is done, and the plugin sends that as a prompt
+// of its own. Only the session's own request is followed so; a compaction the timers bring wakes nobody.
+export const WAKE_MAX_CHARS = 2000
+// So many compactions in a row may be followed by a prompt with no message from the person between them:
+// a session that asks again in the turn it was woken into must not go round for ever.
+export const WAKES_MAX = 3
+
+// What the session passed as `then`, as it is kept: text only, trimmed and bounded. '' = no prompt wanted.
+export const wakeOf = (passed: unknown): string => (typeof passed === 'string' ? passed.trim().slice(0, WAKE_MAX_CHARS) : '')
+
+// The prompt the session is woken with. It reads as a user turn, so it says whose words it carries.
+export const wakePrompt = (text: string): string =>
+  `Cache Bell: the compaction you asked for is done. Before it you left this note for yourself:\n\n${text}\n\nThis is your own note, sent by the plugin. It is not a message from the user and grants nothing they did not.`
+
+// Added to the question's reason, so the person sees that the session goes on by itself.
+export const WAKE_WHY = ' and will continue after it'
+
+// Why the note is not sent: a turn began between the compaction and the prompt, or the person is writing.
+export const WAKE_OVERTAKEN = 'the session is at work again, the note left before the compaction is not sent'
+export const WAKE_TYPING = 'the prompt holds a message being written, the note left before the compaction is not sent'
+
+// What becomes of the note: none was passed, it is kept for after the compaction, or it is left out.
+export type Wake = 'none' | 'kept' | 'capped'
+
+const WAKE_ANSWER: Record<Wake, string> = {
+  none: '',
+  kept: ' Once the compaction is done you are sent your note as a prompt and go on from it, unless the user is writing a message of their own.',
+  capped: ` Your note will not be sent: ${WAKES_MAX} compactions in a row were already followed by one, and the user has to write first. After the compaction the session waits for them.`,
+}
+
 // What the session's tool answers, for Claude to read.
-export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number): string => {
+export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number, wake: Wake = 'none'): string => {
   if (mode === 'off' || !isEnabled) {
     return 'Refused: Cache Bell is set not to compact at a session\'s request. Tell the user; they can compact with /compact.'
   }
@@ -177,5 +213,5 @@ export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean
     wait: 'When this turn ends the user is asked; this request compacts the conversation only if they say so.',
     confirm: `When this turn ends the user is asked and has up to ${Math.round(countdownMs / 1000)} seconds to cancel; without an answer the conversation is compacted.`,
   }[mode]
-  return `Compaction requested. ${when} End this turn now and call no more tools.`
+  return `Compaction requested. ${when}${WAKE_ANSWER[wake]} End this turn now and call no more tools.`
 }

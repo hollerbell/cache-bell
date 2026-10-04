@@ -2,23 +2,33 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.5
+
+- A compaction Claude asked for no longer leaves the session waiting for you. With its request Claude may
+  leave itself a note of what comes next (the tool's new parameter `then`), and the plugin sends the note
+  back as a prompt once the compaction is done. The question says so: `will continue after it`. The note is
+  marked as Claude's own, not as your message. Nothing is sent when you cancel, when you send or are writing
+  a message, when other work started meanwhile, or when the compaction fails; after three compactions in a
+  row that were followed by a note, the next one waits for you. A compaction the timer starts wakes nobody.
+- `Not now` leaves a trace: a notice says that the compaction was cancelled and nothing was compacted.
+
 ## 0.2.4
 
 - When the transcript cannot be read and nothing else names the cache TTL, the plugin no longer acts on
-  the five minutes it assumes: it asks, renews and compacts nothing, says so in the band and in
+  the five minutes it assumes: it does not ask, renew or compact, says so in the band and in
   `/bell status`, and tries the read again after 15 seconds, after a minute and then every five minutes.
   Before, a busy Windows machine could make the read time out, and a session with an hour-long cache was
   then treated as one with five minutes.
 - The transcript is read far less: not at all when it did not grow, and once its TTL is confirmed no
-  more than every two minutes. Of a large transcript only what was appended is read, by its bytes, so the cost no
-  longer grows with the file; on Windows the read takes about half a second instead of more than one.
+  more than every two minutes. Of a large transcript only the end is read, by its bytes: what was appended since
+  the last read, 1 MiB at the most. The cost no longer grows with the file; on Windows the read takes about half a second instead of more than one.
 - The README shows the band after a compaction.
 
 ## 0.2.3
 
-- Typing the message that asks for a compaction no longer holds that compaction back: once a message is
-  sent, the typing that wrote it is over. Before, a compaction asked for within a minute of your last key
-  waited for you "to finish typing", and your next message dropped it.
+- A compaction is no longer held back by the typing of the message that asked for it: once a message is
+  sent, that typing is over. Before, a compaction asked for within a minute of your last key press waited
+  for you "to finish typing", and your next message dropped it.
 
 ## 0.2.2
 

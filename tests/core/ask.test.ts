@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { NONE } from '../../core/extension'
 import { initialState } from '../../core/decide'
 import { resolveConfig } from '../../core/config'
-import { CHOICES, CHOICES_OF, FRAME_MS, SWING_MS, askView, chosenNotice, choiceLabel, choiceOfDigit, digitOf, dropReason, mixColor, questionParts, reloadNotice, requestAnswer, swing, whyText } from '../../core/ask'
+import { CHOICES, CHOICES_OF, FRAME_MS, SWING_MS, askView, chosenNotice, choiceLabel, choiceOfDigit, digitOf, dropReason, mixColor, questionParts, reloadNotice, requestAnswer, swing, wakeOf, wakePrompt, whyText, WAKE_MAX_CHARS } from '../../core/ask'
 import type { OwnChoice } from '../../core/ask'
 
 const state = initialState(resolveConfig({}))
@@ -180,4 +180,15 @@ test('on a light background the line swings between two darker ambers', () => {
   expect(mixColor(1)).toBe('#ffb000')
   expect(askView('In ', 29 * S, 30 * S, 'text', 'light')).toMatchObject({ color: '#b36b00', backgroundColor: undefined })
   expect(askView('In ', 30 * S, 30 * S, 'bg', 'light')).toMatchObject({ color: '#000000', backgroundColor: '#7a5c00' })
+})
+
+test('the note for after a compaction is text, trimmed and bounded, and the answer says what becomes of it', () => {
+  expect([wakeOf(undefined), wakeOf(7), wakeOf('  '), wakeOf(' go on \n')]).toEqual(['', '', '', 'go on'])
+  expect(wakeOf('x'.repeat(WAKE_MAX_CHARS + 50)).length).toBe(WAKE_MAX_CHARS)
+  expect(wakePrompt('go on')).toMatch(/^Cache Bell: the compaction you asked for is done\..*\n\ngo on\n\nThis is your own note, sent by the plugin\. It is not a message from the user/s)
+  expect(requestAnswer('auto', true, 30000, 'kept')).toBe(
+    'Compaction requested. The conversation will be compacted right after this turn ends. Once the compaction is done you are sent your note as a prompt and go on from it, unless the user is writing a message of their own. End this turn now and call no more tools.',
+  )
+  expect(requestAnswer('off', true, 30000, 'kept')).toMatch(/^Refused: /)
+  expect(requestAnswer('off', true, 30000, 'kept')).not.toMatch(/note/)
 })

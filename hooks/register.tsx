@@ -5,8 +5,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, whyText, withdrawAnswer } from '../core/ask'
-import type { AskStyle, Choice, ChoiceText } from '../core/ask'
+import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKES_MAX, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
+import type { AskStyle, Choice, ChoiceText, Wake } from '../core/ask'
 import { OPTION_DEFAULTS, resetReport, resolveConfig } from '../core/config'
 import { decide, fallbackOf, initialState, needsHold } from '../core/decide'
 import { NONE } from '../core/extension'
@@ -82,6 +82,15 @@ const OTHERS = ['task-notification', 'scheduled-trigger', 'peer', 'plugin']
 // where it is run, not in the hook every compaction passes.
 let cause: Cause = OWN_CAUSE
 let note = ''
+// What the session wants to be told once the compaction it asked for is done; it lives and ends with `note`.
+let wakeText = ''
+// How many compactions in a row a prompt followed, with no message from the person between them.
+let wakesInRow = 0
+// The prompt that is on its way to the session, and the turns counted when its compaction ended: a turn
+// that began since takes the prompt back.
+let wakeSent: string | null = null
+let turnsStarted = 0
+let wakeAtTurns = 0
 let isOwnCompaction = false
 
 // What a plugin built on this one adds (core/extension.ts), and every answer's words with it. Set once, when
@@ -332,6 +341,7 @@ const closeQuestion = ($: EngineInterface, choice: Choice, how: How) => {
   // A choice the person selected by its digit is theirs, also when the time ran out on it.
   const isTimers = how === 'time ran out' && question?.isTyped !== true
   dropQuestion($)
+  if (choice === 'skip') $.ui.toast(skippedNotice(isTimers))
   if (choice === 'compact') cause = { ...cause, by: isTimers ? 'timer' : 'person' }
   answer(choice, isTimers)
 }
@@ -397,6 +407,8 @@ const prepare = async ($: EngineInterface, config: Config) => {
   try {
     // The plugin's own prompt may not pass through its own prompt.submit hook: mark the turn here.
     nextTurnBy = 'self'
+    // An announced compaction is the timers' own: no note of the session's follows it.
+    wakeText = ''
     const result = await $.prompt.submit({ text: config.preparePrompt })
     // Another plugin's hook may drop the prompt: then nothing was announced and nothing is compacted.
     if (result.drop === undefined) return
@@ -436,6 +448,34 @@ const sizeNow = async ($: EngineInterface): Promise<number | null> => {
   }
 }
 
+// The session is told what it left for itself: a turn of its own, as the announcement is. Nothing is sent
+// when the person is writing a message, they will say what comes next; nor when work began since the
+// compaction started (`atTurns`), a message sent while it ran included. The prompt waits for the session to
+// be idle, so the prompt.submit hook looks once more.
+const wake = async ($: EngineInterface, text: string, atTurns: number) => {
+  const prompt = wakePrompt(text)
+  try {
+    // A digit left in the prompt box answered the question; it is no message being written.
+    const draft = (await $.prompt.read()).text.trim()
+    if (draft !== '' && choiceOfDigit(CHOICES_OF.session, draft) === null) return $.ui.log(WAKE_TYPING)
+    if (turnsStarted !== atTurns) return $.ui.log(WAKE_OVERTAKEN)
+    wakeSent = prompt
+    wakeAtTurns = atTurns
+    // The turn is somebody else's as the core sees it, whether or not the prompt passes this plugin's own hook.
+    nextTurnBy = 'other'
+    const result = await $.prompt.submit({ text: prompt })
+    if (result.drop === undefined) wakesInRow++
+    else {
+      nextTurnBy = 'unknown'
+      $.ui.log(`note after the compaction not sent: ${String(result.drop)}`)
+    }
+  } catch (err) {
+    nextTurnBy = 'unknown'
+    $.ui.log(`note after the compaction not sent: ${String(err)}`)
+  }
+  if (wakeSent === prompt) wakeSent = null
+}
+
 const compact = async ($: EngineInterface, config: Config, anchorAt: number | null) => {
   // A second passed since the core decided: a turn that began meanwhile takes the compaction back.
   await queue
@@ -450,8 +490,11 @@ const compact = async ($: EngineInterface, config: Config, anchorAt: number | nu
     const before = await sizeNow($)
     const why = cause
     const said = note
+    const then = wakeText
+    const atTurns = turnsStarted
     cause = OWN_CAUSE
     note = ''
+    wakeText = ''
     isOwnCompaction = true
     const result = await $.session.compact(instructions === '' ? {} : { instructions }).finally(() => {
       isOwnCompaction = false
@@ -461,6 +504,7 @@ const compact = async ($: EngineInterface, config: Config, anchorAt: number | nu
     const sizes = { before: result.tokensBefore ?? before, after: result.tokensAfter ?? null }
     await observe($, config, { kind: 'compacted', own: sizes })
     await writeLog($, why, sizes.before, sizes.after, said)
+    if (why.why === 'session' && then !== '' && !isYielding) void wake($, then, atTurns)
   } catch (err) {
     $.ui.log(`compaction failed: ${String(err)}`)
     await observe($, config, { kind: 'compact-failed' })
@@ -475,14 +519,16 @@ const ask = ($: EngineInterface, config: Config, state: State, now: number, reas
     cause = { why: reason, by: 'timer' }
     // What the session said belongs to its own request only.
     if (reason !== 'session') note = ''
+    if (reason !== 'session') wakeText = ''
   }
-  const why = whyText(reason, state, extension, config)
+  const why = whyText(reason, state, extension, config) + (reason === 'session' && wakeText !== '' ? WAKE_WHY : '')
   const answer = async (choice: Choice, isTimers: boolean) => {
     // Any answer but Compact ends what was asked: a later compaction is the cache's course again. Only a
     // compaction that waits keeps its cause through a renewal.
     if (choice !== 'compact' && !(choice === 'renew' && state.held !== null)) {
       cause = OWN_CAUSE
       note = ''
+      wakeText = ''
     }
     // The person's own answer is carried out whatever stands in the way; the timer's is not.
     await observe($, config, { kind: 'answer', choice, isTimers, hold: isTimers ? await holdNow($, state) : null })
@@ -501,12 +547,21 @@ const ask = ($: EngineInterface, config: Config, state: State, now: number, reas
 const perform = ($: EngineInterface, config: Config, action: Action, state: State, now: number) => {
   if (action.kind === 'notify') $.ui.toast(action.text)
   else if (action.kind === 'ask') ask($, config, state, now, action.reason, action.deadline, action.selected)
-  else if (action.kind === 'close-question') dropQuestion($)
+  else if (action.kind === 'close-question') {
+    dropQuestion($)
+    // The core closed the question with nothing left of the request: what the session said goes with it.
+    if (state.phase !== 'COMPACTING' && state.phase !== 'PREPARING' && state.held === null && !state.isRequested) {
+      cause = OWN_CAUSE
+      note = ''
+      wakeText = ''
+    }
+  }
   else if (action.kind === 'renew') {
     // A renewal is the cache's course again, whatever was asked before, unless a compaction waits through it.
     if (state.held === null) {
       cause = OWN_CAUSE
       note = ''
+      wakeText = ''
     }
     void renew($, config)
   }
@@ -618,6 +673,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
         properties: {
           reason: { type: 'string', description: 'One short sentence: why now. Kept in the log of compactions.' },
           countdown: { type: 'number', description: `Seconds the user gets to cancel, ${COUNTDOWN_MIN_S} to ${COUNTDOWN_MAX_S}. Leave it out to use the user's own setting.` },
+          then: { type: 'string', description: `What you want to be told once the compaction is done: the plugin sends it to you as a prompt, and you go on from it. Say what to pick up, in a sentence or two (${WAKE_MAX_CHARS} characters at most). Leave it out when nothing is left to do: the session then waits for the user.` },
           userAsked: { type: 'boolean', description: 'true only when the user themselves asked you, in this conversation, to compact: the countdown is then three seconds.' },
           cancel: { type: 'boolean', description: 'true takes back a request you made earlier, with its countdown. Nothing else is done.' },
         },
@@ -763,12 +819,14 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       if (hadRequest) {
         cause = OWN_CAUSE
         note = ''
+        wakeText = ''
         await observe($, config, { kind: 'withdrawn' })
       }
       return { result: withdrawAnswer(hadRequest) }
     }
     const isAllowed = isWatching && config.enabled && config.sessionCompact !== 'off'
-    const asked = e as { countdown?: unknown; userAsked?: unknown }
+    const asked = e as { countdown?: unknown; userAsked?: unknown; then?: unknown }
+    let wakes: Wake = 'none'
     // That the user asked is the session's word: it is taken only in a turn the user started.
     const countdownMs = countdownOf(asked.countdown, asked.userAsked === true && turnBy === 'person')
     if (isAllowed) {
@@ -780,12 +838,25 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       if (current?.phase === 'BUSY' && !current.isRequested) {
         cause = { why: 'session', by: 'plugin' }
         note = typeof reason === 'string' ? reason : ''
+        wakeText = ''
       }
+      // The note passed last counts; a call without one leaves the earlier note standing.
+      const wanted = wakeOf(asked.then)
+      if (wanted !== '') {
+        wakeText = wakesInRow < WAKES_MAX ? wanted : ''
+        wakes = wakeText !== '' ? 'kept' : 'capped'
+      } else if (wakeText !== '') wakes = 'kept'
       await observe($, config, { kind: 'requested', countdownMs })
+      // A request the core did not take up is followed by nothing.
+      const taken = await read($, machine)
+      if (taken === null || !(taken.isRequested || taken.held !== null)) {
+        wakeText = ''
+        wakes = 'none'
+      }
     }
     // What the core took: a second request in one turn changes nothing, its countdown included.
     const taken = (await read($, machine))?.requestMs ?? config.compactCountdownMs
-    return { result: requestAnswer(config.sessionCompact, isWatching && config.enabled, taken) }
+    return { result: requestAnswer(config.sessionCompact, isWatching && config.enabled, taken, wakes) }
   })
 
   // What the person types into the prompt moves a question's selection.
@@ -812,6 +883,12 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // person is real work: whatever was asked no longer needs an answer.
   on('prompt.submit', async ($, e, next) => {
     const isOwn = e.origin.kind === 'plugin' && e.origin.name === PLUGIN
+    // The note after a compaction: a turn of somebody else's as the core sees it, and no announcement.
+    if (isOwn && wakeSent !== null && e.text === wakeSent) {
+      if (turnsStarted !== wakeAtTurns) return { drop: `${PLUGIN}: ${WAKE_OVERTAKEN}` }
+      nextTurnBy = 'other'
+      return next(e)
+    }
     const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
     // The announcement waits for the session to be idle. When work got in first, the compaction it
     // announces is off, and so is the announcement.
@@ -822,7 +899,13 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (isPerson) lastEditAt = null
     // The person's message, also one sent into a turn that is running, takes back what the session asked
     // for and what waits: they are at work.
-    if (isPerson && (question === null || choiceOfDigit(question.choices, e.text.trim()) === null)) void observe($, config, { kind: 'withdrawn' })
+    if (isPerson && (question === null || choiceOfDigit(question.choices, e.text.trim()) === null)) {
+      // Forgotten here, not only when the turn starts: another plugin may drop the message.
+      cause = OWN_CAUSE
+      note = ''
+      wakeText = ''
+      void observe($, config, { kind: 'withdrawn' })
+    }
     if (question === null || e.origin.kind === 'plugin') return next(e)
     const typed = choiceOfDigit(question.choices, e.text.trim())
     if (typed === null) {
@@ -863,6 +946,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     const by = nextTurnBy
     nextTurnBy = 'unknown'
     turnBy = by
+    turnsStarted++
+    if (by === 'person') wakesInRow = 0
     // Work that is not the plugin's own announcement: what was asked before no longer explains a compaction.
     // Only a compaction that waits for a subagent keeps its cause through the turn that brings the result.
     // So does the session's request that an interrupted question carries over.
@@ -871,6 +956,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (by === 'person' || (by !== 'self' && !isCarried)) {
       cause = OWN_CAUSE
       note = ''
+      wakeText = ''
     }
     if (isWatching) await observe($, config, { kind: 'turn-start', by })
     return next(e)
@@ -895,6 +981,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       if (after !== null && after.phase !== 'ASKING' && after.phase !== 'PREPARING' && after.phase !== 'COMPACTING' && after.held === null) {
         cause = OWN_CAUSE
         note = ''
+        wakeText = ''
       }
     }
     return result

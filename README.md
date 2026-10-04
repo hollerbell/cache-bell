@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.4](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 240 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.5](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 249 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.4, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.5, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -176,6 +176,14 @@ When to ask is yours to say, for example "compact after every finished task" or 
 `cache-bell.sessionCompact` = `wait` nothing is compacted unless you say `Compact`; with `auto` it
 compacts without the countdown.
 
+A compaction leaves the session idle until somebody writes. So with its request Claude may leave itself a
+note of what comes next, and the plugin sends that note back as a prompt once the compaction is done; the
+question then says that the session `will continue after it`. The note is marked as Claude's own, not as
+your message. It is not sent when you cancel, when you send a message during the countdown, when the
+prompt box holds a message you are writing, when other work started meanwhile, or when the compaction
+fails. After three compactions in a row
+that were followed by a note, the next one waits for you. A compaction the timer starts wakes nobody.
+
 A compaction the timer starts waits while you type (a key in the prompt box within the last minute) and
 while a subagent of the session still runs. It never waits past the cache: if the cache runs out first,
 nothing is compacted and the band says so. Text that only lies in the prompt box holds nothing back, and
@@ -220,7 +228,7 @@ the API really granted) and the last model switch; before either is known, from 
 The transcript is read when a turn ends, and once its TTL is confirmed no more than every two minutes;
 a transcript that did not grow is not read at all. If it cannot be read and nothing else names the TTL,
 the five minutes are only a guess: the band says so, the plugin tries again (after 15 seconds, after a
-minute, then every five minutes), and until a read goes through it asks, renews and compacts nothing.
+minute, then every five minutes), and until a read goes through it does not ask, renew or compact.
 
 ## The log of compactions
 
@@ -266,7 +274,8 @@ What it reads:
   `CACHE_BELL_DEMO`;
 - the session's transcript file, for the cache TTL the API granted: only the usage figures of its last lines,
   nothing of what was said, and nothing of it is kept. `readTranscript` = off stops it. Of a transcript above 4 MiB
-  only the end is read, 1 MiB at the most, for which the plugin starts `tail` (PowerShell on Windows);
+  only the end is read: what was appended since the last read, no less than 64 KiB and 1 MiB at the most.
+  For that the plugin starts `tail` (PowerShell on Windows);
 - Claude Code's configuration rows (the `/config` menu). The mods API hands a plugin all of them as one list;
   it uses the theme, to pick colours for a light or a dark background, and on `/bell reset` its own options.
   The other rows are not used, kept or logged;
@@ -302,7 +311,7 @@ beyond the newest 200.
   lifetime came from. Set `ttl` to `5m` or `1h` to fix it by hand.
 - **The band says the lifetime is not known yet.** The transcript could not be read; on Windows a very
   busy machine can make PowerShell too slow to answer. The plugin tries again on its own and until then
-  asks, renews and compacts nothing. To stop depending on the read, set `ttl` to `5m` or `1h`.
+  does not ask, renew or compact. To stop depending on the read, set `ttl` to `5m` or `1h`.
 - **An option does not seem to apply.** `/bell status` prints the mode in use; `/bell reset` puts every
   option back to its default.
 - **The plugin refuses to load after a Claude Code update.** The mods API is early access and changes
