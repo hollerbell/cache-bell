@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.0](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 221 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.1](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 221 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -39,23 +39,25 @@ without your answer.
 
 ## Quick start
 
+In your shell:
+
 ```
-git clone https://github.com/hollerbell/cache-bell.git
-cd cache-bell
-sh install.sh
+claude plugin marketplace add hollerbell/cache-bell
+claude plugin install cache-bell@cache-bell
 ```
 
-On Windows the last line is `.\install.bat`. Then open a new session:
+Then open a new session, or run `/reload-plugins` in one that is open:
 
 - `/bell demo 30` shows the question for 30 seconds and sends nothing;
-- `/bell status` says what the plugin sees.
+- `/bell status` says the plugin's version and what it sees.
 
 In a conversation below 100 000 tokens the plugin only shows the countdown: it does not ask, renew or
-compact on its own. Keep the clone where it is: Claude Code reads the plugin straight from it.
+compact on its own.
 
-To try it for one session without installing, run in the clone: `claude --plugin-dir .`
+To try it for one session without installing, clone the repository and run in the clone:
+`claude --plugin-dir .`
 
-0.2.0, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.1, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -300,23 +302,44 @@ person on the team is responsible for every reply.
 
 ## Install, in detail
 
-Keep the clone where it is: Claude Code reads the plugin straight from it.
+There are two ways to install. Use one; both register a marketplace named `cache-bell`, so remove the one
+you have (`claude plugin marketplace remove cache-bell`) before you switch to the other.
 
-The script runs two commands in the clone:
+**From GitHub.** The two commands of the [Quick start](#quick-start). Claude Code keeps its own copy of the
+plugin. Inside a session the same is `/plugin marketplace add hollerbell/cache-bell`, then
+`/plugin install cache-bell@cache-bell`, which opens the plugin's details and lets you choose where it
+applies.
+
+**From a clone.** Claude Code reads the plugin straight from the clone, so keep the clone where it is:
 
 ```
-claude plugin marketplace add ./
-claude plugin install cache-bell@cache-bell
+git clone https://github.com/hollerbell/cache-bell.git
+cd cache-bell
+sh install.sh
 ```
 
-The path is `./`, a bare `.` is refused. The install ends with a note that options are not set yet; none
-has to be, the defaults work. If you have added a marketplace named `cache-bell` before, from another folder
-(an older clone, a preview), remove that one first: `claude plugin marketplace remove cache-bell`.
+On Windows the last line is `.\install.bat`. The script runs `claude plugin marketplace add ./` (a bare `.`
+is refused) and `claude plugin install cache-bell@cache-bell`.
+
+Either way the install ends with a note that options are not set yet; none has to be, the defaults work.
 
 ## Update
 
-Run `update.bat` or `sh update.sh` in the clone: it pulls the clone (fast-forward only) and refreshes the
-marketplace and the plugin. Sessions that are open pick the new code up with `/reload-plugins`.
+Claude Code does not update a plugin from a marketplace like this one on its own, unless you turn
+auto-update on for it under `/plugin`, Marketplaces.
+
+**Installed from GitHub:**
+
+```
+claude plugin marketplace update cache-bell
+claude plugin update cache-bell@cache-bell
+```
+
+**Installed from a clone:** run `update.bat` or `sh update.sh` in the clone. It pulls the clone
+(fast-forward only) and refreshes the marketplace and the plugin.
+
+Then run `/reload-plugins` in every session that is open; new sessions have the new version.
+`/bell status` says which version runs.
 
 ## Remove
 
@@ -325,7 +348,8 @@ claude plugin uninstall cache-bell@cache-bell
 claude plugin marketplace remove cache-bell
 ```
 
-What the plugin kept on the machine stays until you delete it, see [Privacy](#privacy).
+The same for both ways of installing; a clone you can then delete. What the plugin kept on the machine
+stays until you delete it, see [Privacy](#privacy).
 
 ## Development
 
