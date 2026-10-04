@@ -26,6 +26,9 @@ export type State = {
   anchorAt: number | null
   ttlMs: number
   ttlSource: TtlSource
+  // The transcript, which names the TTL, could not be read. While the TTL is then only the default's guess,
+  // nothing is asked, renewed or compacted.
+  isTtlUnread: boolean
   coldReason: ColdReason | null
   // While a turn runs and has sent no request yet: the phase to return to if it ends that way.
   // null outside a turn and once the turn has sent a request.
@@ -68,7 +71,8 @@ export type State = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'cache-bell': { machine: State | null }
+    // transcript: the session's transcript file as the last Stop named it, for a read to be tried again
+    'cache-bell': { machine: State | null; transcript: string | null }
     // Written by the plugin built on this one (it carries this contract): true while it runs in the session.
     // This plugin only reads it, and stands down when it is set.
     'holler-bell': { isRunning: boolean }

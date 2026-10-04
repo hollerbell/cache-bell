@@ -46,12 +46,13 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '' }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0 }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size = 100): Seen => {
   const seen: Seen = { toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map([['intro', 1]]) }
   answers.tailExit = 0
+  answers.grown = 0
   answers.compactSkip = false
   answers.hasTranscript = true
   answers.forkRead = 143985
@@ -119,7 +120,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     seen.statuses.push(e.text)
     return { value: undefined }
   })
-  on('fs.stat', () => ({ value: { kind: 'file', size, mtimeMs: 0, isLink: false } }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: size + answers.grown, mtimeMs: 0, isLink: false } }))
   on('fs.exists', () => {
     answers.looked += 1
     return { value: answers.hasTranscript }
@@ -442,29 +443,100 @@ test('a compaction that was refused changes nothing', async ($, on) => {
   expect(await status($)).toMatch(/State: warm/)
 })
 
-test('the tail is read with the command of the system, and a failure is logged', async ($, on) => {
+const LARGE = 4 * 1024 * 1024 + 1
+
+test('the end of a large transcript is read with the command of the system', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
-  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, 4 * 1024 * 1024 + 1)
+  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
-  expect(seen.argv).toEqual([['tail', '-n', '60', '/work/session.jsonl']])
+  expect(seen.argv).toEqual([['tail', '-c', '1048576', '/work/session.jsonl']])
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
-
-  answers.tailExit = 1
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
-  expect(seen.logs).toEqual(['transcript not read: Error: tail exited with 1'])
 })
 
-test('on Windows the tail is read by PowerShell with the path inside the command', async ($, on) => {
+test('on Windows the end is read by PowerShell with the path inside the command', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
-  const seen = stubs(on, { OS: 'Windows_NT' }, `${ASSISTANT_1H}\n`, 4 * 1024 * 1024 + 1)
+  const seen = stubs(on, { OS: 'Windows_NT' }, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await $.classic.Stop({ transcript_path: 'C:\\work\\session.jsonl', stop_hook_active: false })
+  expect(seen.argv.length).toBe(1)
+  expect(seen.argv[0]?.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
+  expect(seen.argv[0]?.[4]).toContain("[IO.File]::Open('C:\\work\\session.jsonl','Open','Read','ReadWrite')")
+  expect(seen.argv[0]?.[4]).toContain('[Math]::Min($f.Length,1048576)')
+})
+
+test('a transcript that did not grow is not read again, and a confirmed TTL only now and then', { options: { mode: 'notify' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const stop = () => $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  await turn($, clock, 0)
+  await stop()
+  expect(seen.processes).toBe(1)
+  // The same size: nothing was appended, nothing is read.
+  await stop()
+  expect(seen.processes).toBe(0 + 1)
+  // It grew, but the TTL was confirmed a moment ago.
+  answers.grown = 5000
+  await stop()
+  expect(seen.processes).toBe(1)
+  await clock.advance(100 * S)
+  expect(seen.processes).toBe(1)
+  // Two minutes after the last read what was appended is read, with no turn to wait for: should the cache
+  // have turned short, that is known before the short cache's time to act. Only the appended piece is
+  // read, the least the command reads.
+  await clock.advance(21 * S)
+  expect(seen.processes).toBe(2)
+  await stop()
   expect(seen.argv).toEqual([
-    ['powershell', '-NoProfile', '-NonInteractive', '-Command', "Get-Content -LiteralPath 'C:\\work\\session.jsonl' -Tail 60 -Encoding UTF8"],
+    ['tail', '-c', '1048576', '/work/session.jsonl'],
+    ['tail', '-c', '65536', '/work/session.jsonl'],
   ])
+})
+
+test('a transcript that cannot be read leaves the TTL a guess: nothing is sent on it, and the read is tried again', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
+  answers.tailExit = 1
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect(seen.logs).toEqual(['transcript not read, it is tried again: Error: tail exited with 1'])
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache: lifetime not known yet, the transcript could not be read · nothing is renewed or compacted until it is')
+  // Past the time the assumed five minutes would ask and renew at. The read was tried again after 15
+  // seconds and after a minute more; the failure is said once.
+  await clock.advance(280 * S)
+  expect(seen.processes).toBe(3)
+  expect(seen.logs.length).toBe(1)
+  expect(seen.did).toEqual([])
+  expect(await status($)).toContain('Next: nothing is asked, renewed or compacted until the TTL is read')
+  // The next try, five minutes after the last, goes through: the hour-long cache is still warm.
+  answers.tailExit = 0
+  await clock.advance(100 * S)
+  expect(seen.processes).toBe(4)
+  expect(await status($)).toMatch(/State: warm[\s\S]*Cache TTL: 1h \(read from the transcript\)/)
+  // With 54 minutes left of the hour the band has nothing to say.
+  expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+test('a transcript that is gone in the middle of the tries ends them, and the plugin works with what it assumed', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
+  answers.tailExit = 1
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect(await status($)).toContain('Cache TTL: 5m (assumed: the transcript could not be read, it is tried again)')
+  answers.hasTranscript = false
+  await clock.advance(20 * S)
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  // Nothing more is looked for, second after second.
+  const looked = answers.looked
+  await clock.advance(30 * S)
+  expect(answers.looked).toBe(looked)
+  expect(seen.processes).toBe(1)
 })
 
 test('a model switch turns the cache cold and brings its TTL', async ($, on) => {

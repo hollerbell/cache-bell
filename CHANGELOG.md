@@ -2,6 +2,18 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.4
+
+- When the transcript cannot be read and nothing else names the cache TTL, the plugin no longer acts on
+  the five minutes it assumes: it asks, renews and compacts nothing, says so in the band and in
+  `/bell status`, and tries the read again after 15 seconds, after a minute and then every five minutes.
+  Before, a busy Windows machine could make the read time out, and a session with an hour-long cache was
+  then treated as one with five minutes.
+- The transcript is read far less: not at all when it did not grow, and once its TTL is confirmed no
+  more than every two minutes. Of a large transcript only what was appended is read, by its bytes, so the cost no
+  longer grows with the file; on Windows the read takes about half a second instead of more than one.
+- The README shows the band after a compaction.
+
 ## 0.2.3
 
 - Typing the message that asks for a compaction no longer holds that compaction back: once a message is

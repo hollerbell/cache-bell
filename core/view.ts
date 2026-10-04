@@ -2,7 +2,7 @@
 // report. The shell only draws them.
 
 import { RENEWALS_CAP } from './config'
-import { canRenew, defaultChoice, planOf } from './decide'
+import { canRenew, defaultChoice, isGuessed, lifeOf, planOf } from './decide'
 import { NONE } from './extension'
 import type { Extension } from './extension'
 import { MINUTE_MS, TTL_1H, deadlines } from './timing'
@@ -96,19 +96,24 @@ export const WAITS_FOR = { typing: 'you to finish typing', agent: 'a running sub
 // The countdown runs to tMax, the last moment a request is still sure to hit the cache, not to the TTL
 // itself: the last seconds before the TTL are not safe to rely on.
 const leftMs = (state: State, now: number): number =>
-  state.anchorAt === null ? 0 : deadlines(state.anchorAt, state.ttlMs).tMax - now
+  state.anchorAt === null ? 0 : deadlines(state.anchorAt, lifeOf(state)).tMax - now
 
 // A warm cache with plenty of time left is not worth a line: it shows once the time left is down to what
 // the person set, or at any time while a compaction waits.
 const isShown = (state: State, now: number, config: Config): boolean =>
   config.showBelowMs === 0 || state.held !== null || leftMs(state, now) <= config.showBelowMs
 
+// The band while the TTL is only a guess: what is not known, and what follows from it.
+export const UNREAD = 'prompt cache: lifetime not known yet, the transcript could not be read · nothing is renewed or compacted until it is'
+
 const line = (state: State, now: number, config: Config): Band | null => {
   if (state.phase === 'WARM' && state.anchorAt !== null) {
+    // Worth a line at any time: the plugin is not doing what it is there for.
+    if (state.held === null && isGuessed(state)) return { text: UNREAD, tone: 'calm' }
     if (!isShown(state, now, config)) return null
     // The warning colour says that the cache is about to run out, whether or not the plugin will do anything
     // about it: a countdown alone is worth having.
-    const isLate = now >= deadlines(state.anchorAt, state.ttlMs, config.askLeadMs).tAsk
+    const isLate = now >= deadlines(state.anchorAt, lifeOf(state), config.askLeadMs).tAsk
     const after = state.held !== null ? ` · compaction waits for ${WAITS_FOR[state.held.by]}` : state.isDeclined ? ' · nothing will be done' : ''
     return { text: `prompt cache expires in ${formatLeft(leftMs(state, now))}${after}`, tone: isLate ? 'warn' : 'calm' }
   }
@@ -177,13 +182,16 @@ export const statusReport = (state: State, now: number, config: Config, extra: E
   // The version comes first: a report of a problem needs it.
   rows.push(`${extra.version === undefined ? '' : `version ${extra.version} · `}${config.enabled ? 'on' : 'off'}, mode ${config.mode}`)
   rows.push(`State: ${PHASE_TEXT[state.phase]}${state.phase === 'COLD' && state.coldReason ? `, ${GONE[state.coldReason].short}` : ''}`)
-  rows.push(`Cache TTL: ${formatTtl(state.ttlMs)} (${TTL_SOURCE_TEXT[state.ttlSource]})`)
+  const isUnsure = isGuessed(state)
+  rows.push(`Cache TTL: ${formatTtl(state.ttlMs)} (${isUnsure ? 'assumed: the transcript could not be read, it is tried again' : TTL_SOURCE_TEXT[state.ttlSource]})`)
   if (state.anchorAt === null) {
     rows.push('Last request to the API: none seen')
   } else {
     const { tAsk, tAct, tMax } = deadlines(state.anchorAt, state.ttlMs, config.askLeadMs)
     rows.push(`Last request to the API: ${formatLeft(now - state.anchorAt)} ago`)
-    if (state.phase === 'WARM') {
+    if (state.phase === 'WARM' && isUnsure && state.held === null) {
+      rows.push('Next: nothing is asked, renewed or compacted until the TTL is read')
+    } else if (state.phase === 'WARM') {
       // Only what will really happen, by its name: a mode that does not ask has no time to ask, and so on.
       const { asks, acts } = planOf(state, config)
       const does = defaultChoice(state, config) === 'renew' ? 'renews' : 'compacts'

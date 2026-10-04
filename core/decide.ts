@@ -7,7 +7,7 @@ import type { Choice } from './ask'
 import { NONE } from './extension'
 import type { Extension } from './extension'
 import { RENEWALS_CAP } from './config'
-import { MINUTE_MS, SLEEP_GAP_MS, TTL_5M, deadlines } from './timing'
+import { MINUTE_MS, SLEEP_GAP_MS, TTL_1H, TTL_5M, deadlines } from './timing'
 import type { Action, ColdReason, Config, Decision, Hold, Observation, RestPhase, State, TtlSource } from './types'
 
 // How long past its deadline a question may stay unanswered before the core answers it itself: the shell
@@ -28,6 +28,7 @@ export const initialState = (config: Config): State => ({
   anchorAt: null,
   ttlMs: config.ttlMs ?? TTL_5M,
   ttlSource: config.ttlMs === null ? 'default' : 'config',
+  isTtlUnread: false,
   coldReason: null,
   resumeTo: null,
   ...FRESH,
@@ -65,7 +66,8 @@ const withConfig = (stored: State, config: Config): State => {
   const asked: State = old.requestMs === undefined ? { ...held, requestMs: null } : held
   // What was renewed before the requests were counted was sent, at the least.
   const counted: State = old.renewalsSent === undefined ? { ...asked, renewalsSent: asked.renewals } : asked
-  const state: State = old.workedAt === undefined || old.lastCompaction === undefined ? { ...counted, workedAt: null, lastCompaction: null } : counted
+  const worked: State = old.workedAt === undefined || old.lastCompaction === undefined ? { ...counted, workedAt: null, lastCompaction: null } : counted
+  const state: State = old.isTtlUnread === undefined ? { ...worked, isTtlUnread: false } : worked
   if (config.ttlMs !== null) {
     // The same object when nothing changes: the shell writes the state only when it is a new one.
     if (state.ttlMs === config.ttlMs && state.ttlSource === 'config') return state
@@ -81,6 +83,14 @@ const acceptsTtl = (current: TtlSource, incoming: TtlSource): boolean => {
   if (incoming === 'settings') return current === 'default' || current === 'settings'
   return true
 }
+
+// The TTL is the default's guess, and the transcript that would say could not be read: a guess is nothing
+// to renew or compact on. The session's own request is still asked about; that is not the timer's doing.
+export const isGuessed = (state: State): boolean => state.isTtlUnread && state.ttlSource === 'default'
+
+// How long the cache is taken to live. Behind a guess it may be the hour: everything that waits for the
+// cache's end waits that long, and only what the timer would start on its own is left undone.
+export const lifeOf = (state: State): number => (isGuessed(state) ? TTL_1H : state.ttlMs)
 
 const COLD_WHY: Record<ColdReason, (minutes: number) => string> = {
   expired: minutes => `Prompt cache expired after ${minutes} min without a request.`,
@@ -103,7 +113,7 @@ const coldText = (reason: ColdReason, ttlMs: number): string =>
 const CLOCK_SKEW_MS = MINUTE_MS
 
 const isPastMax = (state: State, now: number): boolean =>
-  state.anchorAt === null || now >= deadlines(state.anchorAt, state.ttlMs).tMax || now < state.anchorAt - CLOCK_SKEW_MS
+  state.anchorAt === null || now >= deadlines(state.anchorAt, lifeOf(state)).tMax || now < state.anchorAt - CLOCK_SKEW_MS
 
 // A question that is not about the cache still has to be over while the cache is warm: its countdown ends
 // this long before the last safe moment at the latest. With less than that left to decide in, it is not
@@ -113,7 +123,7 @@ export const LATE_MARGIN_MS = 10 * 1000
 // When the countdown of such a question ends; null when the cache runs out too soon to ask.
 const askUntil = (state: State, now: number, countdownMs: number): number | null => {
   if (state.anchorAt === null) return null
-  const last = deadlines(state.anchorAt, state.ttlMs).tMax - LATE_MARGIN_MS
+  const last = deadlines(state.anchorAt, lifeOf(state)).tMax - LATE_MARGIN_MS
   return last - now < LATE_MARGIN_MS ? null : Math.min(now + countdownMs, last)
 }
 
@@ -125,7 +135,7 @@ export const EXTENSION_COUNTDOWN_MS = 3 * MINUTE_MS
 // its time to ask where it asks, else at its time to act. null when that is too soon to ask.
 const waitUntil = (state: State, now: number, config: Config): number | null => {
   if (state.anchorAt === null) return null
-  const { tAsk, tAct } = deadlines(state.anchorAt, state.ttlMs, config.askLeadMs)
+  const { tAsk, tAct } = deadlines(state.anchorAt, lifeOf(state), config.askLeadMs)
   const until = planOf(state, config).asks ? tAsk : tAct
   return until - now < LATE_MARGIN_MS ? null : until
 }
@@ -168,7 +178,7 @@ export const defaultChoice = (state: State, config: Config): Choice => {
 
 const cold = (state: State, coldReason: ColdReason, before: Action[] = []): Decision => ({
   state: { ...state, ...UNASKED, ...UNHELD, phase: 'COLD', coldReason },
-  actions: [...before, { kind: 'notify', text: coldText(coldReason, state.ttlMs) }, { kind: 'redraw' }],
+  actions: [...before, { kind: 'notify', text: coldText(coldReason, lifeOf(state)) }, { kind: 'redraw' }],
 })
 
 // Who decided: the timer (the cache's course, a question nobody answered), which waits for `hold`, or the
@@ -219,7 +229,8 @@ export const fallbackOf = (state: State, config: Config, extension: Extension): 
 export const needsHold = (state: State, now: number, config: Config): boolean => {
   if (state.anchorAt === null) return false
   if (state.phase === 'ASKING') return now >= (state.askDeadline ?? 0)
-  return state.phase === 'WARM' && (state.held !== null || now >= deadlines(state.anchorAt, state.ttlMs, config.askLeadMs).tAct)
+  if (state.held === null && isGuessed(state)) return false
+  return state.phase === 'WARM' && (state.held !== null || now >= deadlines(state.anchorAt, lifeOf(state), config.askLeadMs).tAct)
 }
 
 const isExtensions = (state: State): boolean =>
@@ -228,7 +239,7 @@ const isExtensions = (state: State): boolean =>
 const tick = (state: State, now: number, gapMs: number, hold: Hold | null, config: Config, extension: Extension): Decision => {
   const redraw: Action[] = [{ kind: 'redraw' }]
   if (state.phase === 'RENEWING' || state.phase === 'PREPARING' || state.phase === 'COMPACTING') {
-    const isGivenUp = state.anchorAt === null || now >= deadlines(state.anchorAt, state.ttlMs).tMax + WORK_GRACE_MS
+    const isGivenUp = state.anchorAt === null || now >= deadlines(state.anchorAt, lifeOf(state)).tMax + WORK_GRACE_MS
     if (!isGivenUp) return { state, actions: [] }
     return cold(state, state.phase === 'COMPACTING' ? 'compact-failed' : state.phase === 'RENEWING' ? 'renew-missed' : 'expired')
   }
@@ -241,7 +252,7 @@ const tick = (state: State, now: number, gapMs: number, hold: Hold | null, confi
     const isPostponed = state.phase === 'WARM' && state.held !== null && gapMs >= 0
     return cold(state, gapMs > SLEEP_GAP_MS ? 'sleep' : isPostponed ? 'postponed' : 'expired', close)
   }
-  const { tAsk, tAct } = deadlines(state.anchorAt ?? now, state.ttlMs, config.askLeadMs)
+  const { tAsk, tAct } = deadlines(state.anchorAt ?? now, lifeOf(state), config.askLeadMs)
 
   // Switched off with a question open or a compaction waiting: the question is gone with the reload, and
   // nothing is done about either.
@@ -262,6 +273,10 @@ const tick = (state: State, now: number, gapMs: number, hold: Hold | null, confi
   // The compaction that waited: the way is clear.
   if (state.held !== null && hold === null) return act(state, 'compact', config, extension, { hold })
 
+  // Only a guess of the TTL: the timer asks, renews and compacts nothing on the strength of it. A question
+  // already up and a compaction that waits are not the timer's doing, and went their way above.
+  if (isGuessed(state)) return { state, actions: state.held === null ? [] : redraw }
+
   // The one retry of a renewal that got no answer waits for its time.
   if (state.retryAt !== null && now < state.retryAt) return { state, actions: redraw }
 
@@ -276,6 +291,14 @@ const tick = (state: State, now: number, gapMs: number, hold: Hold | null, confi
     }
   }
   return { state, actions: redraw }
+}
+
+// The guess ended: the TTL is known now. If that is past the time to ask, a mode that owes the question does
+// nothing more in this idle period, rather than renew or compact without having asked.
+const known = (before: State, after: State, now: number, config: Config): State => {
+  if (!isGuessed(before) || isGuessed(after) || after.phase !== 'WARM' || after.anchorAt === null || after.held !== null) return after
+  const isLate = now >= deadlines(after.anchorAt, after.ttlMs, config.askLeadMs).tAsk
+  return isLate && planOf(after, config).asks ? { ...after, isDeclined: true } : after
 }
 
 const step = (state: State, now: number, observation: Observation, config: Config, extension: Extension): Decision => {
@@ -417,10 +440,16 @@ const step = (state: State, now: number, observation: Observation, config: Confi
     }
 
     case 'ttl': {
-      if (!acceptsTtl(state.ttlSource, observation.source)) return { state, actions: [] }
-      if (state.ttlMs === observation.ttlMs && state.ttlSource === observation.source) return { state, actions: [] }
-      return { state: { ...state, ttlMs: observation.ttlMs, ttlSource: observation.source }, actions: redraw }
+      // The transcript was read: whatever it says, it is no longer unread.
+      const read: State = observation.source === 'transcript' && state.isTtlUnread ? { ...state, isTtlUnread: false } : state
+      const drawn = read === state ? [] : redraw
+      if (!acceptsTtl(read.ttlSource, observation.source)) return { state: known(state, read, now, config), actions: drawn }
+      if (read.ttlMs === observation.ttlMs && read.ttlSource === observation.source) return { state: known(state, read, now, config), actions: drawn }
+      return { state: known(state, { ...read, ttlMs: observation.ttlMs, ttlSource: observation.source }, now, config), actions: redraw }
     }
+
+    case 'ttl-unread':
+      return state.isTtlUnread === observation.isUnread ? { state, actions: [] } : { state: known(state, { ...state, isTtlUnread: observation.isUnread }, now, config), actions: redraw }
 
     case 'model-switch': {
       const takesTtl = observation.ttlMs !== null && acceptsTtl(state.ttlSource, 'model-switch')

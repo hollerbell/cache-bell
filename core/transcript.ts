@@ -49,9 +49,23 @@ export const ttlFromTranscript = (text: string): number | null => {
 // string each is doubled, or a folder named with one would end the string.
 const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g
 
-// The command that prints the last lines of a file too large to read whole. On Windows the path goes into
-// the command text itself, quoted: PowerShell's -Command hands no further arguments to the command.
-export const tailCommand = (path: string, lines: number, isWindows: boolean): string[] =>
+// The command that prints the last `bytes` of a file too large to read whole. It jumps to the place and
+// reads only that much, so its cost does not grow with the file. The piece may start in the middle of a
+// line, or of a character: that line does not parse and is skipped. On Windows the path goes into the
+// command text itself, quoted: PowerShell's -Command hands no further arguments to the command. The file is
+// opened shared, so Claude Code can go on writing to it.
+export const tailCommand = (path: string, bytes: number, isWindows: boolean): string[] =>
   isWindows
-    ? ['powershell', '-NoProfile', '-NonInteractive', '-Command', `Get-Content -LiteralPath '${path.replace(POWERSHELL_QUOTES, quote => quote + quote)}' -Tail ${lines} -Encoding UTF8`]
-    : ['tail', '-n', String(lines), path]
+    ? [
+        'powershell',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        [
+          `$f=[IO.File]::Open('${path.replace(POWERSHELL_QUOTES, quote => quote + quote)}','Open','Read','ReadWrite')`,
+          `try{$n=[int][Math]::Min($f.Length,${bytes});[void]$f.Seek(-$n,'End');$b=New-Object byte[] $n;$r=0`,
+          'while($r -lt $n){$k=$f.Read($b,$r,$n-$r);if($k -le 0){break};$r+=$k}}finally{$f.Close()}',
+          '[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b,0,$r))',
+        ].join(';'),
+      ]
+    : ['tail', '-c', String(bytes), path]

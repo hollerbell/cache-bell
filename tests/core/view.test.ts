@@ -4,7 +4,7 @@ import { resolveConfig } from '../../core/config'
 import { decide, initialState } from '../../core/decide'
 import { TTL_1H } from '../../core/timing'
 import type { State } from '../../core/types'
-import { PALETTE, band, compactedText, formatIdle, introOf, formatLeft, formatTokens, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
+import { PALETTE, UNREAD, band, compactedText, formatIdle, introOf, formatLeft, formatTokens, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
 
 const S = 1000
 // A Monday morning: 2026-01-12 09:00 UTC.
@@ -289,4 +289,19 @@ test('/bell status opens with the plugin\'s version, when the manifest states on
   expect(statusReport(warm(), T0, config, { contextTokens: 1, version: '0.1.0' }).split('\n')[0]).toBe('version 0.1.0 · on, mode prepare-compact')
   expect(statusReport(warm(), T0, config, { contextTokens: 1 }).split('\n')[0]).toBe('on, mode prepare-compact')
   expect(statusReport(warm(), T0, resolveConfig({ enabled: false }), { contextTokens: 1, version: '0.1.0' }).split('\n')[0]).toBe('version 0.1.0 · off, mode prepare-compact')
+})
+
+test('a TTL that is only a guess is said in the band and in the report, with what follows from it', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const guessed = warm({ contextTokens: 150000, isTtlUnread: true })
+  // With an hour-long limit of the band a warm cache shows nothing; the guess is shown at any time.
+  expect(band(guessed, T0 + 10 * S, acting)).toEqual({ text: `h⣿ Cache Bell: ${UNREAD}`, tone: 'calm' })
+  const report = statusReport(guessed, T0 + 10 * S, acting, { contextTokens: 150000 })
+  expect(report).toContain('Cache TTL: 5m (assumed: the transcript could not be read, it is tried again)')
+  expect(report).toContain('Next: nothing is asked, renewed or compacted until the TTL is read')
+  expect(report).not.toMatch(/asks in|renews in|cache lost in/)
+  // A TTL that was read and a later read that failed: the plugin goes on with what it knows.
+  const known = statusReport(warm({ contextTokens: 150000, isTtlUnread: true, ttlMs: TTL_1H, ttlSource: 'transcript' }), T0 + 10 * S, acting, { contextTokens: 150000 })
+  expect(known).toContain('Cache TTL: 1h (read from the transcript)')
+  expect(known).toMatch(/Next: asks in/)
 })

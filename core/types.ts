@@ -37,6 +37,8 @@ export type Observation =
   // the shell could not carry out a step (the announcement did not get through)
   | { kind: 'refused'; reason: string }
   | { kind: 'ttl'; ttlMs: number; source: 'transcript' | 'settings' }
+  // the transcript could not be read, or was read and names no TTL
+  | { kind: 'ttl-unread'; isUnread: boolean }
   | { kind: 'model-switch'; ttlMs: number | null }
   // own: the plugin ran it itself, with the sizes before and after in tokens
   | { kind: 'compacted'; own?: { before: number | null; after: number | null } }

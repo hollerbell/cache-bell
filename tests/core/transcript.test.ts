@@ -63,22 +63,20 @@ test('the newest line that names a TTL wins', () => {
   }
 })
 
-test('the tail of a large file is read by the system the session runs on', () => {
-  expect(tailCommand('/srv/work/.claude/projects/x/s.jsonl', 60, false)).toEqual(['tail', '-n', '60', '/srv/work/.claude/projects/x/s.jsonl'])
-  expect(tailCommand('D:\\home\\me\\s.jsonl', 60, true)).toEqual([
-    'powershell',
-    '-NoProfile',
-    '-NonInteractive',
-    '-Command',
-    "Get-Content -LiteralPath 'D:\\home\\me\\s.jsonl' -Tail 60 -Encoding UTF8",
-  ])
+test('the end of a large file is read by its bytes, by the system the session runs on', () => {
+  expect(tailCommand('/srv/work/.claude/projects/x/s.jsonl', 65536, false)).toEqual(['tail', '-c', '65536', '/srv/work/.claude/projects/x/s.jsonl'])
+  const windows = tailCommand('D:\\home\\me\\s.jsonl', 65536, true)
+  expect(windows.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
+  // It opens the file shared, jumps to the place and reads no more than it was told to.
+  expect(windows[4]).toContain("[IO.File]::Open('D:\\home\\me\\s.jsonl','Open','Read','ReadWrite')")
+  expect(windows[4]).toContain('[Math]::Min($f.Length,65536)')
+  expect(windows[4]).toContain("$f.Seek(-$n,'End')")
+  expect(windows[4]).not.toContain('Get-Content')
   // A path with a space and an apostrophe stays one quoted argument.
-  expect(tailCommand("D:\\home\\O'Neil\\my files\\s.jsonl", 5, true)[4]).toBe(
-    "Get-Content -LiteralPath 'D:\\home\\O''Neil\\my files\\s.jsonl' -Tail 5 -Encoding UTF8",
-  )
+  expect(tailCommand("D:\\home\\O'Neil\\my files\\s.jsonl", 5, true)[4]).toContain("Open('D:\\home\\O''Neil\\my files\\s.jsonl','Open'")
   // PowerShell takes a typographic apostrophe for a quote as well: each of the four is doubled.
   for (const quote of ['\u2018', '\u2019', '\u201A', '\u201B']) {
-    expect(tailCommand(`D:\\Tom${quote}s\\s.jsonl`, 5, true)[4]).toBe(`Get-Content -LiteralPath 'D:\\Tom${quote}${quote}s\\s.jsonl' -Tail 5 -Encoding UTF8`)
+    expect(tailCommand(`D:\\Tom${quote}s\\s.jsonl`, 5, true)[4]).toContain(`Open('D:\\Tom${quote}${quote}s\\s.jsonl','Open'`)
   }
 })
 

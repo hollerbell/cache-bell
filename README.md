@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.3](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 230 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.4](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 240 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.3, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.4, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -182,7 +182,8 @@ nothing is compacted and the band says so. Text that only lies in the prompt box
 neither does a background shell command. Your own answer `Compact` is carried out at once.
 
 After a compaction of its own the band says what was done, until your next message:
-`compacted 144k → 21k tokens after 2 h idle · /bell log`.
+
+![The band after a compaction of its own: compacted 144k → 21k tokens after 2 h idle](docs/band-compacted.svg)
 
 To change what it does, in `/config`:
 
@@ -216,6 +217,11 @@ the API really granted) and the last model switch; before either is known, from 
 (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `promptCacheTtl`). When nothing is known,
 5 minutes is assumed.
 
+The transcript is read when a turn ends, and once its TTL is confirmed no more than every two minutes;
+a transcript that did not grow is not read at all. If it cannot be read and nothing else names the TTL,
+the five minutes are only a guess: the band says so, the plugin tries again (after 15 seconds, after a
+minute, then every five minutes), and until a read goes through it asks, renews and compacts nothing.
+
 ## The log of compactions
 
 Every compaction of the conversation is logged: the plugin's own, your `/compact`, and the one Claude Code
@@ -239,8 +245,9 @@ the Claude Code configuration directory), the last 200 entries, for all sessions
 - A compaction waits for your typing and for running subagents (see
   [What it does on its own](#what-it-does-on-its-own-and-what-it-sends)), not for a background shell command: a server left
   running would hold every compaction back. Renewals wait for nothing.
-- Where no process can be started to read a large transcript (see [Privacy](#privacy)), the TTL stays
-  what the settings say.
+- Where a large transcript cannot be read (no process can be started, see [Privacy](#privacy), or the
+  machine is too busy to answer in ten seconds), the TTL stays what the settings or a model switch say.
+  With neither, the plugin only shows that it does not know, until a read goes through.
 - Claude Code itself compacts idle sessions above roughly 200k tokens (since 2.1.286). The plugin sees
   that compaction and goes to sleep after it.
 - The colours for a light background are tested, but not yet checked in a real light terminal.
@@ -258,8 +265,8 @@ What it reads:
 - the environment variables `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `OS` and
   `CACHE_BELL_DEMO`;
 - the session's transcript file, for the cache TTL the API granted: only the usage figures of its last lines,
-  nothing of what was said, and nothing of it is kept. `readTranscript` = off stops it. A transcript above 4 MiB is read by its
-  last lines, for which the plugin starts `tail` (PowerShell on Windows);
+  nothing of what was said, and nothing of it is kept. `readTranscript` = off stops it. Of a transcript above 4 MiB
+  only the end is read, 1 MiB at the most, for which the plugin starts `tail` (PowerShell on Windows);
 - Claude Code's configuration rows (the `/config` menu). The mods API hands a plugin all of them as one list;
   it uses the theme, to pick colours for a light or a dark background, and on `/bell reset` its own options.
   The other rows are not used, kept or logged;
@@ -293,6 +300,9 @@ beyond the newest 200.
   (100 000), or you chose `Let it expire` in this idle period. `/bell status` says which.
 - **It says 5m and the cache lives an hour, or the other way round.** `/bell status` shows where the
   lifetime came from. Set `ttl` to `5m` or `1h` to fix it by hand.
+- **The band says the lifetime is not known yet.** The transcript could not be read; on Windows a very
+  busy machine can make PowerShell too slow to answer. The plugin tries again on its own and until then
+  asks, renews and compacts nothing. To stop depending on the read, set `ttl` to `5m` or `1h`.
 - **An option does not seem to apply.** `/bell status` prints the mode in use; `/bell reset` puts every
   option back to its default.
 - **The plugin refuses to load after a Claude Code update.** The mods API is early access and changes

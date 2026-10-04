@@ -23,8 +23,87 @@ const run = (from: State, steps: [number, Observation][], cfg: Config = config):
   steps.reduce((current, [now, observation]) => decide(current, now, observation, cfg).state, from)
 
 test('the initial state knows nothing and assumes five minutes', () => {
-  expect(initialState(config)).toEqual({ phase: 'UNKNOWN', anchorAt: null, ttlMs: TTL_5M, ttlSource: 'default', coldReason: null, resumeTo: null, renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, retryAt: null, contextTokens: null, askReason: null, askDeadline: null, ext: {}, isRequested: false, priorAnchorAt: null, held: null, isOrdered: false, requestMs: null, workedAt: null, lastCompaction: null })
+  expect(initialState(config)).toEqual({ phase: 'UNKNOWN', anchorAt: null, ttlMs: TTL_5M, ttlSource: 'default', isTtlUnread: false, coldReason: null, resumeTo: null, renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, retryAt: null, contextTokens: null, askReason: null, askDeadline: null, ext: {}, isRequested: false, priorAnchorAt: null, held: null, isOrdered: false, requestMs: null, workedAt: null, lastCompaction: null })
   expect(initialState(resolveConfig({ ttl: '1h' }))).toMatchObject({ ttlMs: TTL_1H, ttlSource: 'config' })
+})
+
+test('on a TTL that is only a guess nothing is asked, renewed or compacted', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const guessed = warm({ contextTokens: 150000, isTtlUnread: true })
+  // Past every moment the five assumed minutes would name: the state stays the object it was.
+  for (const seconds of [200, 240, 280, 600, 3000]) {
+    const { state: after, actions } = decide(guessed, T0 + seconds * S, tick, acting)
+    expect(after).toBe(guessed)
+    expect(actions).toEqual([])
+  }
+  // Whatever the TTL was, an hour after the last request the cache is gone, and the notice names the hour.
+  const gone = decide(guessed, T0 + 3600 * S, tick, acting)
+  expect(gone.state).toMatchObject({ phase: 'COLD', coldReason: 'expired' })
+  expect(gone.actions[0]).toEqual({ kind: 'notify', text: 'Prompt cache expired after 60 min without a request. The next message re-sends the whole context uncached.' })
+  // The same idle session with a TTL that was read is asked at its time.
+  expect(kinds(decide(warm({ contextTokens: 150000 }), T0 + 215 * S, tick, acting).actions)).toContain('ask')
+  // A TTL some source did name is not a guess, read or not.
+  expect(kinds(decide(warm({ contextTokens: 150000, isTtlUnread: true, ttlSource: 'settings' }), T0 + 215 * S, tick, acting).actions)).toContain('ask')
+})
+
+test('behind a guess a compaction that waits is neither asked about nor renewed for, and goes ahead when the way is clear', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const waiting = warm({ contextTokens: 150000, isTtlUnread: true, held: { by: 'agent', isTold: true } })
+  const held: Observation = { kind: 'tick', gapMs: S, hold: 'agent' }
+  // Past the time the five assumed minutes would ask, renew and give the cache up at.
+  for (const seconds of [215, 245, 280, 900]) {
+    const { state: after, actions } = decide(waiting, T0 + seconds * S, held, acting)
+    expect(after).toBe(waiting)
+    expect(kinds(actions)).toEqual(['redraw'])
+  }
+  const clear = decide(waiting, T0 + 900 * S, tick, acting)
+  expect(clear.state.phase).toBe('COMPACTING')
+  expect(kinds(clear.actions)).toContain('compact')
+})
+
+test('a guess that ends past the time to ask leaves the cache alone in a mode that asks', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const guessed = warm({ contextTokens: 150000, isTtlUnread: true })
+  // Read at 4:10 and it is five minutes after all: too late for the question, so nothing is sent.
+  const late = decide(guessed, T0 + 250 * S, { kind: 'ttl', ttlMs: TTL_5M, source: 'transcript' }, acting).state
+  expect(late).toMatchObject({ isTtlUnread: false, ttlSource: 'transcript', isDeclined: true })
+  expect(kinds(decide(late, T0 + 251 * S, tick, acting).actions)).toEqual(['redraw'])
+  // The same when the read finds no TTL and the default is all there is.
+  expect(decide(guessed, T0 + 250 * S, { kind: 'ttl-unread', isUnread: false }, acting).state.isDeclined).toBe(true)
+  // In time for the question, the course goes on as usual; and an hour leaves all the time there is.
+  expect(decide(guessed, T0 + 100 * S, { kind: 'ttl', ttlMs: TTL_5M, source: 'transcript' }, acting).state.isDeclined).toBe(false)
+  expect(decide(guessed, T0 + 250 * S, { kind: 'ttl', ttlMs: TTL_1H, source: 'transcript' }, acting).state.isDeclined).toBe(false)
+  // A mode that never asks owes no question: it acts as it would have.
+  const silent = resolveConfig({ mode: 'custom', ask: 'never', renewMethod: 'fork', compact: false })
+  expect(decide(guessed, T0 + 250 * S, { kind: 'ttl', ttlMs: TTL_5M, source: 'transcript' }, silent).state.isDeclined).toBe(false)
+})
+
+test('behind a guess the question about what the session asked for has the hour to be answered in', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const asked = warm({ contextTokens: 150000, isTtlUnread: true, phase: 'ASKING', askReason: 'session', askDeadline: T0 + 330 * S })
+  // 5:20 after the last request: with five minutes taken for a fact the cache would be called cold here.
+  const { state: after, actions } = decide(asked, T0 + 320 * S, tick, acting)
+  expect(after).toBe(asked)
+  expect(actions).toEqual([])
+})
+
+test('a transcript that is read again ends the guess, whatever it says', () => {
+  const guessed = warm({ isTtlUnread: true })
+  expect(decide(warm(), T0, { kind: 'ttl-unread', isUnread: true }, config)).toMatchObject({ state: { isTtlUnread: true }, actions: [{ kind: 'redraw' }] })
+  expect(decide(guessed, T0, { kind: 'ttl-unread', isUnread: true }, config)).toEqual({ state: guessed, actions: [] })
+  // Read, and it names no TTL: the default is all there is, and the plugin works with it.
+  expect(decide(guessed, T0, { kind: 'ttl-unread', isUnread: false }, config)).toMatchObject({ state: { isTtlUnread: false, ttlSource: 'default' }, actions: [{ kind: 'redraw' }] })
+  expect(decide(guessed, T0, { kind: 'ttl', ttlMs: TTL_1H, source: 'transcript' }, config).state).toMatchObject({ isTtlUnread: false, ttlMs: TTL_1H, ttlSource: 'transcript' })
+  // The settings say what was asked for, not that the transcript was read.
+  expect(decide(guessed, T0, { kind: 'ttl', ttlMs: TTL_1H, source: 'settings' }, config).state).toMatchObject({ isTtlUnread: true, ttlSource: 'settings' })
+  // The same TTL as before, after a read that had failed: recorded as read.
+  const confirmed = warm({ isTtlUnread: true, ttlMs: TTL_1H, ttlSource: 'transcript' })
+  expect(decide(confirmed, T0, { kind: 'ttl', ttlMs: TTL_1H, source: 'transcript' }, config)).toMatchObject({ state: { isTtlUnread: false }, actions: [{ kind: 'redraw' }] })
+})
+
+test('a state written before the transcript\'s reading was tracked counts as read', () => {
+  const { isTtlUnread: _, ...old } = warm()
+  expect(decide(old as State, T0 + S, tick, config).state.isTtlUnread).toBe(false)
 })
 
 test('one observation moves the phase as the table says', () => {

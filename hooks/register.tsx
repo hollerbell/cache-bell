@@ -21,6 +21,8 @@ import { BAND_PREFIX, INTRO_KEY, INTRO_SEEN, MARK, PALETTE, PLUGIN, band, introO
 import type { Band, Intro, Look } from '../core/view'
 
 const machine = atom({ plugin: 'cache-bell', key: 'machine' } as const, null)
+// The path of the session's transcript: a read that failed is tried again also after the plugin was loaded anew.
+const transcript = atom({ plugin: 'cache-bell', key: 'transcript' } as const, null)
 // The plugin built on this one says here that it runs in the session. This one then stands down, so the
 // session is watched, asked about and compacted once, not twice.
 const superior = atom({ plugin: 'holler-bell', key: 'isRunning' } as const, false)
@@ -28,11 +30,29 @@ const superior = atom({ plugin: 'holler-bell', key: 'isRunning' } as const, fals
 const TICK_MS = 1000
 // $.fs.read refuses a larger file; a long session's transcript is larger.
 const FS_READ_LIMIT = 4 * 1024 * 1024
-const TAIL_LINES = 60
+// How much of a larger file's end is read at the most, and at the least: a response's row is far smaller,
+// but a row with a picture in it is not.
+const TAIL_MAX_BYTES = 1024 * 1024
+const TAIL_MIN_BYTES = 64 * 1024
+// A TTL the transcript has confirmed is looked up again no sooner than this after the last read. It changes
+// only when the model does (which is reported) or when Claude Code falls back to the short cache, and that
+// has to be known before the short cache's time to act.
+const RECHECK_MS = 2 * 60 * 1000
+// After a read that failed: when it is tried again, the first, the second and every later time.
+const REREAD_MS = [15 * 1000, 60 * 1000]
+const REREAD_LATER_MS = 5 * 60 * 1000
 
 // The module's own variables start over at every reload; what must survive one is in `$.state`.
 let ticker: { cancel: () => void } | null = null
 let lastTickAt = 0
+// The session's transcript, as the last Stop named it, and what is known of reading it: the file's size
+// and the time at the last read that went through, how many failed since, and when to try again.
+let transcriptPath: string | undefined
+let readSize: number | null = null
+let readAt: number | null = null
+let unread = 0
+let rereadAt: number | null = null
+let isReading = false
 let drawn = ''
 // Whether what a reload left behind in the state has been dealt with: once, at the first observation.
 let isRecovered = false
@@ -159,6 +179,18 @@ const tick = async ($: EngineInterface, config: Config) => {
   const state = await read($, machine)
   const hold = state !== null && needsHold(state, now, config) ? await holdNow($, state) : null
   await observe($, config, { kind: 'tick', gapMs, hold })
+  // The plugin was loaded anew with a read still owed: what the module knew of it is gone.
+  if (state?.isTtlUnread === true && rereadAt === null && unread === 0 && !isReading && config.ttlMs === null) {
+    if (!config.readTranscript) {
+      // Nothing will be read: the default is all there is.
+      await observe($, config, { kind: 'ttl-unread', isUnread: false })
+    } else {
+      transcriptPath ??= (await read($, transcript)) ?? undefined
+      if (transcriptPath !== undefined) rereadAt = now
+    }
+  }
+  // A read that failed, or was put off, is done without waiting for the next turn: an idle session has none.
+  if (rereadAt !== null && now >= rereadAt) void readTranscriptTtl($, config, transcriptPath).catch(err => $.ui.log(`transcript not read: ${String(err)}`))
 }
 
 // What the person asked Claude Code for. Settings are read by name: the object can hold secrets.
@@ -171,26 +203,61 @@ const readSettingsTtl = async ($: EngineInterface): Promise<number | null> => {
   })
 }
 
-const readTail = async ($: EngineInterface, path: string): Promise<string> => {
-  const { size } = await $.fs.stat(path)
+// The end of the transcript: a small file whole, of a large one only what was appended since the last read.
+const readTail = async ($: EngineInterface, path: string, size: number): Promise<string> => {
   if (size <= FS_READ_LIMIT) return $.fs.read(path)
+  const added = readSize !== null && size > readSize ? size - readSize : TAIL_MAX_BYTES
+  const bytes = Math.min(Math.max(added, TAIL_MIN_BYTES), TAIL_MAX_BYTES)
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-  const result = await $.process.run(tailCommand(path, TAIL_LINES, isWindows), { timeoutMs: 10000 })
+  const result = await $.process.run(tailCommand(path, bytes, isWindows), { timeoutMs: 10000 })
   if (result.exitCode !== 0) throw new Error(`tail exited with ${result.exitCode}`)
   return result.stdout
 }
 
-// The TTL the API really granted is only in the transcript. Where it cannot be read (no process on this
-// surface, a file gone), the TTL stays what the settings or the default say.
-const readTranscriptTtl = async ($: EngineInterface, config: Config, path: string | undefined) => {
-  if (!config.readTranscript || config.ttlMs !== null || path === undefined || path === '') return
+// The TTL the API really granted is only in the transcript. It is read while it is not known, and then
+// seldom: a file that did not grow is not read at all, and a confirmed TTL is looked up again only now and
+// then. A read that fails is tried again, and until one goes through the core is told that the TTL is not
+// read. Where there is nothing to read (reading switched off, no transcript), the TTL stays what the
+// settings or the default say.
+async function readTranscriptTtl($: EngineInterface, config: Config, path: string | undefined): Promise<void> {
+  if (!config.readTranscript || config.ttlMs !== null || path === undefined || path === '' || isReading) return
+  isReading = true
   try {
     // A session that keeps no transcript (a child session, persistence switched off) has nothing to read.
-    if (!(await $.fs.exists(path))) return
-    const ttlMs = ttlFromTranscript(await readTail($, path))
-    if (ttlMs !== null) await observe($, config, { kind: 'ttl', ttlMs, source: 'transcript' })
+    if (!(await $.fs.exists(path))) {
+      // The file is gone in the middle of a run of failures: there is nothing left to try.
+      if (unread > 0) await observe($, config, { kind: 'ttl-unread', isUnread: false })
+      unread = 0
+      rereadAt = null
+      return
+    }
+    const { size } = await $.fs.stat(path)
+    const now = await $.clock.now()
+    const state = await read($, machine)
+    const isConfirmed = state !== null && state.ttlSource === 'transcript' && !state.isTtlUnread
+    if (unread === 0 && size === readSize) {
+      rereadAt = null
+      return
+    }
+    // Read a moment ago: what was appended since is read once that moment has passed, turn or no turn.
+    if (unread === 0 && isConfirmed && readAt !== null && now - readAt < RECHECK_MS) {
+      rereadAt = readAt + RECHECK_MS
+      return
+    }
+    const ttlMs = ttlFromTranscript(await readTail($, path, size))
+    readSize = size
+    readAt = now
+    unread = 0
+    rereadAt = null
+    await observe($, config, ttlMs === null ? { kind: 'ttl-unread', isUnread: false } : { kind: 'ttl', ttlMs, source: 'transcript' })
   } catch (err) {
-    $.ui.log(`transcript not read: ${String(err)}`)
+    unread += 1
+    rereadAt = (await $.clock.now()) + (REREAD_MS[unread - 1] ?? REREAD_LATER_MS)
+    // Said once for a run of failures, not at every try.
+    if (unread === 1) $.ui.log(`transcript not read, it is tried again: ${String(err)}`)
+    await observe($, config, { kind: 'ttl-unread', isUnread: true })
+  } finally {
+    isReading = false
   }
 }
 
@@ -836,7 +903,13 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // The other Stop hooks go first: reading a large transcript's tail starts a process.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    if (isWatching) await readTranscriptTtl($, config, e.transcript_path)
+    if (isWatching && e.transcript_path !== transcriptPath) {
+      transcriptPath = e.transcript_path
+      // Another file: what was read of the old one says nothing of it.
+      readSize = null
+      await update($, transcript, () => transcriptPath ?? null)
+    }
+    if (isWatching) await readTranscriptTtl($, config, transcriptPath)
     return result
   })
 
