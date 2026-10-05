@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.5](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 249 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.6](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 249 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.5, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.6, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -176,13 +176,14 @@ When to ask is yours to say, for example "compact after every finished task" or 
 `cache-bell.sessionCompact` = `wait` nothing is compacted unless you say `Compact`; with `auto` it
 compacts without the countdown.
 
-A compaction leaves the session idle until somebody writes. So with its request Claude may leave itself a
-note of what comes next, and the plugin sends that note back as a prompt once the compaction is done; the
-question then says that the session `will continue after it`. The note is marked as Claude's own, not as
-your message. It is not sent when you cancel, when you send a message during the countdown, when the
-prompt box holds a message you are writing, when other work started meanwhile, or when the compaction
-fails. After three compactions in a row
-that were followed by a note, the next one waits for you. A compaction the timer starts wakes nobody.
+A compaction leaves the session idle until somebody writes. So when Claude asks for a compaction, it may
+leave itself a note about what comes next. Once the compaction is done, the plugin sends that note back as
+a prompt, and the question, when there is one, says that the session `will continue after it`. The note is
+marked as Claude's own, not as your message. The note is not sent when you cancel, when you send a message
+during the countdown, when the prompt box holds a message you are writing, when other work has started
+since the compaction began, or when the compaction fails. After three compactions in a row that were
+followed by a note, no further note is sent until you write a message. A compaction started by the cache
+timer never sends a note.
 
 A compaction the timer starts waits while you type (a key in the prompt box within the last minute) and
 while a subagent of the session still runs. It never waits past the cache: if the cache runs out first,
@@ -292,6 +293,12 @@ directory; with Claude Code 2.1.288 in `plugins/store/`):
   after, the cause and who decided, the first eight characters of the session id, and the one sentence
   Claude gave as its reason when it asked for the compaction (at most 200 characters; nothing else of the
   conversation). The log holds the newest 200 entries, older ones are dropped.
+
+What it only holds in memory: the note Claude may leave with a compaction request. The plugin keeps it
+until the compaction is done or called off, sends it back as a prompt after a compaction that went
+through, unless one of the cases named above holds, and does not write it anywhere itself. Claude Code
+records the request and the prompt in the session's transcript on this machine, as it does every tool
+call and prompt.
 
 It writes nothing to `settings.json` on its own and never asks for credentials. `/bell reset` asks Claude
 Code to put the plugin's own options back to their defaults, the way the `/config` menu would. To delete what it kept, delete its

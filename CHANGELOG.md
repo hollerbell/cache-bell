@@ -2,6 +2,14 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.6
+
+- The README says more exactly what happens with the note Claude may leave with a compaction request:
+  when it is sent and when not, and, under Privacy, that the plugin only holds it in memory and does not
+  write it anywhere itself; Claude Code records it in the session's transcript.
+
+No change in what the plugin does.
+
 ## 0.2.5
 
 - A compaction Claude asked for no longer leaves the session waiting for you. With its request Claude may
