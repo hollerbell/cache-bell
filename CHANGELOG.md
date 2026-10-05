@@ -2,6 +2,12 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.8
+
+- The first-run notice shown in several sessions at once is put away in all of them by OK, or by a message,
+  in one: the others follow within a few seconds.
+- The plugin's entry in Anthropic's directory gets keywords and a home page: two more fields in the manifest.
+
 ## 0.2.7
 
 - The plugin's entry in Anthropic's directory gets an icon, a file beside the manifest, and links to the

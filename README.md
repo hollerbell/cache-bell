@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.7](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 252 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.8](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 254 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.7, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.8, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -297,12 +297,15 @@ What it reads:
 - its own manifest (`plugin.json`), for the version `/bell status` shows;
 - one value another plugin may keep in the session's state: whether the plugin built on this one
   (`holler-bell`) runs in the session. When it does, Cache Bell stands down: it shows nothing, asks nothing
-  and compacts nothing.
+  and compacts nothing;
+- its own store, described below: at the start, for whether the first-run notice was seen, and for
+  `/bell log`.
 
 What it writes. In its own store (a JSON file of the plugin under the Claude Code configuration
 directory; with Claude Code 2.1.288 in `plugins/store/`):
 
-- that the first-run notice was seen;
+- that the first-run notice was seen. While the notice is up in a session, the plugin reads this back
+  every three seconds, so that OK in one session puts the notice away in the others;
 - the log of compactions, which `/bell log` shows you, one entry for each: the time, the sizes before and
   after, the cause and who decided, the first eight characters of the session id, and the one sentence
   Claude gave as its reason when it asked for the compaction (at most 200 characters; nothing else of the

@@ -1868,6 +1868,44 @@ test('OK takes the notice down, and a machine that has seen it is not told again
   expect(await bandText($)).toBe('drawn by Claude Code')
 })
 
+test('OK in another session takes the notice down here too, but not one put up for a look', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  seen.store.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(10 * S)
+  expect((await introDrawn($)).hasButton).toBe(true)
+  // The other session writes what this one would have written.
+  seen.store.set('intro', 1)
+  await clock.advance(4 * S)
+  await clock.settle()
+  expect((await introDrawn($)).hasButton).toBe(false)
+  await run($, 'show intro')
+  await clock.advance(10 * S)
+  await clock.settle()
+  expect((await introDrawn($)).hasButton).toBe(true)
+})
+
+test('the real notice stays the real one under /bell show intro, and a look that is put away is not remembered', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  seen.store.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await run($, 'show intro')
+  seen.store.set('intro', 1)
+  await clock.advance(4 * S)
+  await clock.settle()
+  expect((await introDrawn($)).hasButton).toBe(false)
+  // A look, on a machine that has not seen the notice: OK takes it down and writes nothing.
+  seen.store.clear()
+  await run($, 'show intro')
+  const ui = await $.ui.mount(abovePrompt())
+  await ui.press({ key: 'intro-ok' })
+  await ui.unmount()
+  expect((await introDrawn($)).hasButton).toBe(false)
+  expect(seen.store.get('intro')).toBe(undefined)
+})
+
 test('a machine that has seen the notice starts without it', async ($, on) => {
   mock.clock(on, { now: T0 })
   stubs(on)

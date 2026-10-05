@@ -1,13 +1,25 @@
 {
   "name": "cache-bell",
   "displayName": "Cache Bell",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation.",
   "author": {
     "name": "FEO digital agency s.r.o."
   },
   "license": "MIT",
+  "keywords": [
+    "prompt-cache",
+    "cache",
+    "compaction",
+    "compact",
+    "context",
+    "tokens",
+    "usage-limits",
+    "long-sessions"
+  ],
+  "homepage": "https://github.com/hollerbell/cache-bell",
   "repository": "https://github.com/hollerbell/cache-bell",
+  "icon": "./.claude-plugin/icon.png",
   "documentationUrl": "https://github.com/hollerbell/cache-bell#readme",
   "supportUrl": "https://github.com/hollerbell/cache-bell/issues",
   "privacyPolicyUrl": "https://github.com/hollerbell/cache-bell#privacy",

@@ -28,6 +28,8 @@ const transcript = atom({ plugin: 'cache-bell', key: 'transcript' } as const, nu
 const superior = atom({ plugin: 'holler-bell', key: 'isRunning' } as const, false)
 
 const TICK_MS = 1000
+// How often a session that shows the first-run notice asks the store whether another session put it away.
+const INTRO_ASK_MS = 3000
 // $.fs.read refuses a larger file; a long session's transcript is larger.
 const FS_READ_LIMIT = 4 * 1024 * 1024
 // How much of a larger file's end is read at the most, and at the least: a response's row is far smaller,
@@ -185,6 +187,8 @@ const tick = async ($: EngineInterface, config: Config) => {
   const now = await $.clock.now()
   const gapMs = lastTickAt === 0 ? 0 : now - lastTickAt
   lastTickAt = now
+  // Before the core's turn: the queue it waits for may be long.
+  await followIntro($, now)
   const state = await read($, machine)
   const hold = state !== null && needsHold(state, now, config) ? await holdNow($, state) : null
   await observe($, config, { kind: 'tick', gapMs, hold })
@@ -316,6 +320,10 @@ let shown: Band | null = null
 let blinker: { cancel: () => void } | null = null
 // The first-run notice while it is up: what the plugin does without the person. null = seen, or nothing to say.
 let intro: Intro | null = null
+// When the store was last asked whether the notice was put away in another session; 0 = not yet.
+let introAskedAt = 0
+// The notice is up for a look only (/bell show intro): the store neither takes it down nor learns of it.
+let isIntroLook = false
 
 const endQuestion = ($: EngineInterface, said: string) => {
   if (question === null) return
@@ -620,13 +628,30 @@ const showIntro = async ($: EngineInterface, config: Config) => {
   // The plugin built on this one may have turned up while the store was read: then it is its to tell.
   if (isYielding) return
   intro = introOf(config)
+  isIntroLook = false
   if (intro !== null) $.ui.invalidate('ui.render')
+}
+
+// Several sessions may show the notice at once: OK in one of them puts it away in all, within a few seconds.
+const followIntro = async ($: EngineInterface, now: number) => {
+  if (intro === null || isIntroLook || now - introAskedAt < INTRO_ASK_MS) return
+  introAskedAt = now
+  try {
+    if ((await $.store.get(INTRO_KEY)) !== INTRO_SEEN || intro === null || isIntroLook) return
+  } catch {
+    // Asked again in a moment.
+    return
+  }
+  intro = null
+  $.ui.invalidate('ui.render')
 }
 
 const dismissIntro = async ($: EngineInterface) => {
   if (intro === null) return
   intro = null
   $.ui.invalidate('ui.render')
+  // A look taken down is not the notice seen: the other sessions keep theirs.
+  if (isIntroLook) return
   try {
     await $.store.set(INTRO_KEY, INTRO_SEEN)
   } catch (err) {
@@ -727,6 +752,8 @@ const command = async ($: EngineInterface, config: Config, unknown: readonly str
   }
   // For screenshots: holds the band in one of its looks, whatever the cache really does. Sends nothing.
   if (verb === 'show' && words[1] === 'intro') {
+    // The real notice, still up, stays the real one.
+    isIntroLook = intro === null || isIntroLook
     intro = introOf(config)
     $.ui.invalidate('ui.render')
     return { text: intro === null ? 'With these settings there is nothing to tell.' : 'Showing the first-run notice.' }
