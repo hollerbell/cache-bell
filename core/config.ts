@@ -1,6 +1,6 @@
 // plugin.json's userConfig → the configuration the core works with. Claude Code checks only the type of a
-// value and, for a picker, that it is one of the options; bounds are kept here. A value that makes no sense
-// falls back to its default instead of failing the load.
+// value; which words an option takes, and the bounds of a number, are kept here. A value that makes no sense
+// falls back to its default instead of failing the load, and /bell status says so.
 
 import { MINUTE_MS, parseTtl } from './timing'
 import type { Config, Mode } from './types'
@@ -20,7 +20,7 @@ export const DEFAULT_MODE: Mode = 'prepare-compact'
 
 type Options = Readonly<Record<string, unknown>>
 
-// Every option with the default plugin.json gives it: what /bell reset puts back. A test holds this table to
+// Every option with the default plugin.json gives it. A test holds this table to
 // what the configuration resolves to with no options set.
 export type OptionValue = boolean | string | number
 export const OPTION_DEFAULTS: Readonly<Record<string, OptionValue>> = {
@@ -44,14 +44,6 @@ export const OPTION_DEFAULTS: Readonly<Record<string, OptionValue>> = {
   readTranscript: true,
 }
 
-// What a reset did, in words: which options were put back, which Claude Code would not change.
-export const resetReport = (changed: readonly string[], denied: readonly string[]): string => {
-  const rows: string[] = []
-  if (changed.length > 0) rows.push(`Put back to the default: ${changed.join(', ')}.`)
-  if (denied.length > 0) rows.push(`Not changed, Claude Code refused: ${denied.join(', ')}.`)
-  return rows.length === 0 ? 'Every option already has its default.' : rows.join('\n')
-}
-
 type Behaviour = Pick<Config, 'ask' | 'maxRenewals' | 'maxRenewalsAsked' | 'renewMethod' | 'prepareBeforeCompact' | 'compact'>
 
 // The most renewals of one idle period, in every mode: each renewal reads the whole context on the person's
@@ -66,8 +58,29 @@ export const PRESETS: Record<Exclude<Mode, 'custom'>, Behaviour> = {
   'compact-only': { ask: 'never', maxRenewals: 0, maxRenewalsAsked: null, renewMethod: 'none', prepareBeforeCompact: false, compact: true },
 }
 
+// The options that take one of a few words, with those words. /config shows each as a row of free text.
+export const WORDS = {
+  mode: ['notify', 'keep', 'prepare-compact', 'compact-only', 'custom'],
+  ask: ['first', 'every', 'never'],
+  renewMethod: ['fork', 'none'],
+  ttl: ['auto', '5m', '1h'],
+  sessionCompact: ['confirm', 'wait', 'auto', 'off'],
+  display: ['band', 'status', 'both', 'off'],
+} as const
+
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   allowed.includes(value as T) ? (value as T) : fallback
+
+// The options only the custom mode reads: under a preset their value, right or wrong, decides nothing.
+const CUSTOM_ONLY: readonly string[] = ['ask', 'renewMethod']
+
+// What /bell status says of each such option that is set to something else: the default is used instead.
+// An option that is not set at all is not a mistake, and neither is one the mode in use does not read.
+export const unknownWords = (options: Options): string[] =>
+  Object.entries(WORDS)
+    .filter(([name]) => !CUSTOM_ONLY.includes(name) || oneOf<Mode>(options.mode, WORDS.mode, DEFAULT_MODE) === 'custom')
+    .filter(([name, allowed]) => options[name] !== undefined && !(allowed as readonly unknown[]).includes(options[name]))
+    .map(([name, allowed]) => `${name} is set to ${JSON.stringify(options[name])}, which is not one of ${allowed.join(', ')}; the default, ${String(OPTION_DEFAULTS[name])}, is used`)
 
 const bool = (value: unknown, fallback: boolean): boolean => (typeof value === 'boolean' ? value : fallback)
 
@@ -87,11 +100,11 @@ const renewals = (value: unknown): Pick<Config, 'maxRenewals' | 'maxRenewalsAske
 }
 
 export const resolveConfig = (options: Options): Config => {
-  const mode = oneOf<Mode>(options.mode, ['notify', 'keep', 'prepare-compact', 'compact-only', 'custom'], DEFAULT_MODE)
+  const mode = oneOf<Mode>(options.mode, WORDS.mode, DEFAULT_MODE)
   const custom: Behaviour = {
-    ask: oneOf(options.ask, ['first', 'every', 'never'], 'first'),
+    ask: oneOf(options.ask, WORDS.ask, 'first'),
     ...renewals(options.maxRenewals),
-    renewMethod: oneOf(options.renewMethod, ['fork', 'none'], 'fork'),
+    renewMethod: oneOf(options.renewMethod, WORDS.renewMethod, 'fork'),
     prepareBeforeCompact: bool(options.prepareBeforeCompact, true),
     compact: bool(options.compact, true),
   }
@@ -108,8 +121,8 @@ export const resolveConfig = (options: Options): Config => {
     minContextTokens: whole(options.minContextTokens, 0, 10_000_000, 100000),
     compactCountdownMs: whole(options.compactCountdown, 5, 3600, 30) * 1000,
     askLeadMs: whole(options.askLeadMinutes, 0, 600, 0) * MINUTE_MS,
-    sessionCompact: oneOf(options.sessionCompact, ['confirm', 'wait', 'auto', 'off'], 'confirm'),
-    display: oneOf(options.display, ['band', 'status', 'both', 'off'], 'band'),
+    sessionCompact: oneOf(options.sessionCompact, WORDS.sessionCompact, 'confirm'),
+    display: oneOf(options.display, WORDS.display, 'band'),
     showBelowMs: whole(options.showBelowMinutes, 0, 600, 30) * MINUTE_MS,
     readTranscript: bool(options.readTranscript, true),
   }

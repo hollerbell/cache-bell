@@ -355,7 +355,7 @@ test('/bell status answers without a turn and refuses what is not there yet', as
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   expect(await status($)).toMatch(/^version 0\.1\.0 · on, mode prepare-compact\nState: unknown/)
   expect((await run($, '')).text).toMatch(/State: unknown/)
-  expect((await run($, 'now')).text).toBe('Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off | reset')
+  expect((await run($, 'now')).text).toBe('Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off')
   for (const count of ['abc', '0', '201', '1.5', '-3']) expect((await run($, `log ${count}`)).text).toBe('Usage: /bell log [count], 1 to 200.')
   expect((await run($, 'log 200')).text).not.toMatch(/^Usage/)
   expect((await run($, 'log')).text).not.toMatch(/^Usage/)
@@ -1669,25 +1669,6 @@ test('notify with a waiting session request sends nothing at all without the per
   expect(await status($)).toContain('State: cold, expired')
 })
 
-test('/bell reset puts back the options that differ from their defaults, and only those', async ($, on) => {
-  mock.clock(on, { now: T0 })
-  stubs(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect((await run($, 'reset')).text).toBe('Every option already has its default.')
-
-  answers.rows = {
-    'cache-bell.mode': 'keep',
-    'cache-bell.maxRenewals': 2,
-    'cache-bell.compactCountdown': 180,
-    'cache-bell.enabled': false,
-    'cache-bell.ttl': '1h',
-    'other-plugin.mode': 'keep',
-  }
-  expect((await run($, 'reset')).text).toBe('Put back to the default: enabled, mode, compactCountdown.\nNot changed, Claude Code refused: ttl.')
-  expect(answers.sets).toEqual(['cache-bell.enabled=true', 'cache-bell.mode=prepare-compact', 'cache-bell.compactCountdown=30'])
-  expect(answers.rows['other-plugin.mode']).toBe('keep')
-})
-
 // A turn another session's message starts: its prompt comes in with an origin that is not the person's.
 const otherTurn = async ($: Engine, clock: Clock, lastsMs: number) => {
   await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
@@ -1902,7 +1883,7 @@ const askingWith = async ($: Engine, clock: Clock, then: string | undefined, isP
   const stream = $.turn.step({ turnId: 'w', index: 0, model: 'claude-test', messageCount: 1 })
   let step = await stream.next()
   while (step.done !== true) step = await stream.next()
-  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'the task is done', ...(then === undefined ? {} : { then }) } as never)) as { result?: unknown }
+  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'the task is done', ...(then === undefined ? {} : { resumeWith: then }) } as never)) as { result?: unknown }
   await $.turn.complete({ turnId: 'w', answer: 'note', durationMs: 0, isAborted: false, reason: 'answer' })
   await clock.settle()
   return String(called.result)
@@ -2033,9 +2014,9 @@ test('of two requests in one turn the note passed last counts; a digit left in t
   while (step.done !== true) step = await stream.next()
   const first = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done' } as never)) as { result?: unknown }
   expect(String(first.result)).not.toMatch(/your note/)
-  const second = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', then: 'First.' } as never)) as { result?: unknown }
+  const second = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', resumeWith: 'First.' } as never)) as { result?: unknown }
   expect(String(second.result)).toMatch(/you are sent your note/)
-  const third = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', then: 'Second.' } as never)) as { result?: unknown }
+  const third = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', resumeWith: 'Second.' } as never)) as { result?: unknown }
   expect(String(third.result)).toMatch(/you are sent your note/)
   // A call with no note leaves the last one standing, and says so.
   const fourth = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done' } as never)) as { result?: unknown }
@@ -2062,3 +2043,50 @@ test('a compaction the timers bring wakes nobody, also after a request that was 
   expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
   expect(wakes(seen)).toEqual([])
 })
+
+test('/bell status names an option set to a word it does not take, and the default used instead', { options: { mode: 'kep', display: 'band', ttl: '10m' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const report = await status($)
+  expect(report).toContain('mode prepare-compact')
+  expect(report).toContain('mode is set to "kep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used')
+  expect(report).toContain('ttl is set to "10m", which is not one of auto, 5m, 1h; the default, auto, is used')
+  expect(report).not.toContain('display is set')
+})
+
+test('the note is also taken under the name the parameter had before 0.2.7', { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.prompt.submit({ text: 'wrap up', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'wrap up', turnId: 'w' })
+  const called = (await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', then: 'Go on.' } as never)) as { result?: unknown }
+  expect(String(called.result)).toMatch(/you are sent your note as a prompt/)
+  await $.turn.complete({ turnId: 'w', answer: 'note', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(1)
+  expect(wakes(seen)[0]).toContain('Go on.')
+})
+
+// Of the two names of the note the new one counts; an empty new one leaves the old.
+for (const [passed, sent] of [[{ resumeWith: 'New.', then: 'Old.' }, 'New.'], [{ resumeWith: '  ', then: 'Old.' }, 'Old.']] as const) {
+  test(`a request with resumeWith "${passed.resumeWith}" and then "${passed.then}" is followed by "${sent}"`, { options: { compactCountdown: 30 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    await $.prompt.submit({ text: 'wrap up', wait: false, origin: { kind: 'composer' } })
+    await $.turn.start({ text: 'wrap up', turnId: 'w' })
+    await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'done', ...passed } as never)
+    await $.turn.complete({ turnId: 'w', answer: 'note', durationMs: 0, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    await clock.advance(32 * S)
+    await clock.settle()
+    expect(wakes(seen).length).toBe(1)
+    expect(wakes(seen)[0]).toContain(`\n\n${sent}\n\n`)
+  })
+}

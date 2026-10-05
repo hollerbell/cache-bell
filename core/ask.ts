@@ -3,7 +3,7 @@
 
 import type { Extension } from './extension'
 import type { AskReason, Config, State } from './types'
-import { BAND_PREFIX, MARK, NAME, PLUGIN, formatLeft, formatTokens } from './view'
+import { BAND_PREFIX, MARK, NAME, PLUGIN, formatLeft, formatCount } from './view'
 import type { Look } from './view'
 
 // How often the line is redrawn while the countdown runs: ten frames a second, the most a band is given.
@@ -40,7 +40,7 @@ const SWING: Record<Look, { from: readonly number[]; to: readonly number[] }> = 
 export const mixColor = (share: number, look: Look = 'dark'): string => {
   const mix = Math.min(Math.max(share, 0), 1)
   const { from, to } = SWING[look]
-  return `#${from.map((start, i) => hex(start + ((to[i] ?? start) - start) * mix)).join('')}`
+  return '#' + from.map((start, i) => hex(start + ((to[i] ?? start) - start) * mix)).join('')
 }
 
 // Where the swing stands after `elapsedMs`: 0 at the start, 1 half a swing later, 0 again after a whole one,
@@ -123,7 +123,7 @@ const renewalsLeft = (state: State, config: Config): string => {
 // The reason in words.
 export const whyText = (reason: AskReason, state: State, extension: Extension, config: Config): string => {
   // What is at stake: the size of the context that would be sent again, when it is known.
-  const size = state.contextTokens === null ? '' : ` (${formatTokens(state.contextTokens)} tokens)`
+  const size = state.contextTokens === null ? '' : ` (${formatCount(state.contextTokens)} tokens)`
   if (reason === 'cache') return `${CACHE_SOON}${size}${renewalsLeft(state, config)}`
   if (reason === 'session') return 'the session asked for a compaction'
   return extension.reasons[reason]?.why(state) ?? ''
@@ -180,7 +180,7 @@ export const WAKE_MAX_CHARS = 2000
 // a session that asks again in the turn it was woken into must not go round for ever.
 export const WAKES_MAX = 3
 
-// What the session passed as `then`, as it is kept: text only, trimmed and bounded. '' = no prompt wanted.
+// What the session passed as `resumeWith`, as it is kept: text only, trimmed and bounded. '' = no prompt wanted.
 export const wakeOf = (passed: unknown): string => (typeof passed === 'string' ? passed.trim().slice(0, WAKE_MAX_CHARS) : '')
 
 // The prompt the session is woken with. It reads as a user turn, so it says whose words it carries.

@@ -1,11 +1,16 @@
 {
   "name": "cache-bell",
-  "version": "0.2.6",
+  "displayName": "Cache Bell",
+  "version": "0.2.7",
   "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation.",
   "author": {
     "name": "FEO digital agency s.r.o."
   },
   "license": "MIT",
+  "repository": "https://github.com/hollerbell/cache-bell",
+  "documentationUrl": "https://github.com/hollerbell/cache-bell#readme",
+  "supportUrl": "https://github.com/hollerbell/cache-bell/issues",
+  "privacyPolicyUrl": "https://github.com/hollerbell/cache-bell#privacy",
   "types": "./types/index.d.ts",
   "userConfig": {
     "enabled": {
@@ -18,24 +23,12 @@
       "type": "string",
       "title": "Mode",
       "description": "notify: countdown and question only. keep: renew the cache silently, three times at most, never compact. prepare-compact: ask, renew twice, ask again, announce, compact. compact-only: compact before the cache expires. custom: use the five options below.",
-      "options": [
-        "notify",
-        "keep",
-        "prepare-compact",
-        "compact-only",
-        "custom"
-      ],
       "default": "prepare-compact"
     },
     "ask": {
       "type": "string",
       "title": "Ask (custom mode)",
-      "description": "When to ask during one idle period: the first time, every time, or never.",
-      "options": [
-        "first",
-        "every",
-        "never"
-      ],
+      "description": "When to ask during one idle period. first: the first time only. every: every time. never: not at all.",
       "default": "first"
     },
     "maxRenewals": {
@@ -50,10 +43,6 @@
       "type": "string",
       "title": "Renewal method (custom mode)",
       "description": "fork: a silent side request that leaves no trace in the conversation. none: do not keep the cache warm.",
-      "options": [
-        "fork",
-        "none"
-      ],
       "default": "fork"
     },
     "prepareBeforeCompact": {
@@ -89,12 +78,7 @@
     "ttl": {
       "type": "string",
       "title": "Cache TTL",
-      "description": "auto reads it from the session's transcript; 5m or 1h sets it by hand.",
-      "options": [
-        "auto",
-        "5m",
-        "1h"
-      ],
+      "description": "auto: read from the session's transcript. 5m or 1h: set by hand.",
       "default": "auto"
     },
     "minContextTokens": {
@@ -116,12 +100,6 @@
       "type": "string",
       "title": "Compaction asked for by the session",
       "description": "What happens when Claude itself asks for a compaction (the compact skill). confirm: you are asked and it compacts when the countdown ends without your answer. wait: you are asked and the request is dropped unless you say Compact. auto: it compacts right after the turn. off: Claude cannot ask.",
-      "options": [
-        "confirm",
-        "wait",
-        "auto",
-        "off"
-      ],
       "default": "confirm"
     },
     "askLeadMinutes": {
@@ -134,13 +112,7 @@
     "display": {
       "type": "string",
       "title": "Display",
-      "description": "Where the countdown shows: the band above the prompt, the status line, both, or nowhere.",
-      "options": [
-        "band",
-        "status",
-        "both",
-        "off"
-      ],
+      "description": "Where the countdown shows. band: above the prompt. status: in the status line. both: in both. off: nowhere.",
       "default": "band"
     },
     "showBelowMinutes": {

@@ -2,6 +2,20 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.7
+
+- The plugin's entry in Anthropic's directory gets an icon, a file beside the manifest, and links to the
+  repository, the documentation, the privacy section and the issues, new fields in the manifest. Claude Code
+  itself reads none of them.
+- The README's Privacy section now names everything the plugin reads, writes and changes.
+- The options that take one of a few words (`mode`, `ask`, `renewMethod`, `ttl`, `sessionCompact`,
+  `display`) are rows of free text in `/config`, no longer a list to pick from: Anthropic's plugin directory
+  does not take such a list. A word an option does not take is replaced by the default, as before, and `/bell status`
+  now says so and names the words the option takes.
+- `/bell reset` is gone: the plugin no longer writes any setting. To go back to the defaults, change the
+  rows in `/config`, or delete the plugin's key under `pluginConfigs` in `settings.json`.
+- The `compact` tool's parameter for the note is called `resumeWith` (it was `then`, which is still read).
+
 ## 0.2.6
 
 - The README says more exactly what happens with the note Claude may leave with a compaction request:

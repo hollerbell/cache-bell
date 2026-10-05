@@ -4,7 +4,7 @@ import { resolveConfig } from '../../core/config'
 import { decide, initialState } from '../../core/decide'
 import { TTL_1H } from '../../core/timing'
 import type { State } from '../../core/types'
-import { PALETTE, UNREAD, band, compactedText, formatIdle, introOf, formatLeft, formatTokens, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
+import { PALETTE, UNREAD, band, compactedText, formatIdle, introOf, formatLeft, formatCount, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
 
 const S = 1000
 // A Monday morning: 2026-01-12 09:00 UTC.
@@ -224,7 +224,7 @@ test('a size in tokens is written as short as it reads', () => {
     [999500, '1.0M'],
     [1234567, '1.2M'],
   ]
-  for (const [tokens, text] of table) expect({ tokens, text: formatTokens(tokens) }).toEqual({ tokens, text })
+  for (const [tokens, text] of table) expect({ tokens, text: formatCount(tokens) }).toEqual({ tokens, text })
 })
 
 test('a cold cache says how much the next message sends again, when the size is known', () => {

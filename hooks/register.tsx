@@ -7,7 +7,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKES_MAX, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
 import type { AskStyle, Choice, ChoiceText, Wake } from '../core/ask'
-import { OPTION_DEFAULTS, resetReport, resolveConfig } from '../core/config'
+import { resolveConfig, unknownWords } from '../core/config'
 import { decide, fallbackOf, initialState, needsHold } from '../core/decide'
 import { NONE } from '../core/extension'
 import type { Extend, Extension } from '../core/extension'
@@ -656,7 +656,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
     await $.command.register({
       name: 'bell',
       description: 'Cache Bell: the state of the prompt cache',
-      argumentHint: 'status | log [count] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off | reset',
+      argumentHint: 'status | log [count] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off',
       immediate: true,
     })
   } catch (err) {
@@ -673,7 +673,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
         properties: {
           reason: { type: 'string', description: 'One short sentence: why now. Kept in the log of compactions.' },
           countdown: { type: 'number', description: `Seconds the user gets to cancel, ${COUNTDOWN_MIN_S} to ${COUNTDOWN_MAX_S}. Leave it out to use the user's own setting.` },
-          then: { type: 'string', description: `What you want to be told once the compaction is done: the plugin sends it to you as a prompt, and you go on from it. Say what to pick up, in a sentence or two (${WAKE_MAX_CHARS} characters at most). Leave it out when nothing is left to do: the session then waits for the user.` },
+          resumeWith: { type: 'string', description: `What you want to be told once the compaction is done: the plugin sends it to you as a prompt, and you go on from it. Say what to pick up, in a sentence or two (${WAKE_MAX_CHARS} characters at most). Leave it out when nothing is left to do: the session then waits for the user.` },
           userAsked: { type: 'boolean', description: 'true only when the user themselves asked you, in this conversation, to compact: the countdown is then three seconds.' },
           cancel: { type: 'boolean', description: 'true takes back a request you made earlier, with its countdown. Nothing else is done.' },
         },
@@ -710,30 +710,9 @@ const versionNow = async ($: EngineInterface): Promise<string | undefined> => {
 }
 
 // What /bell takes, said whenever it is given something else.
-const USAGE = 'Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off | reset'
+const USAGE = 'Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off'
 
-// Puts every option of the plugin back to its default, through the rows of /config as the person would:
-// only a row whose value differs is touched, so Claude Code loads the plugin again as seldom as it can.
-const reset = async ($: EngineInterface): Promise<string> => {
-  const rows = await $.config.list()
-  const changed: string[] = []
-  const denied: string[] = []
-  for (const [name, value] of Object.entries({ ...OPTION_DEFAULTS, ...extension.defaults })) {
-    const row = rows.find(found => found.key === `${PLUGIN}.${name}`)
-    if (row === undefined || row.value === value) continue
-    try {
-      const result = await $.config.set({ key: row.key, value })
-      if (result.deny === undefined) changed.push(name)
-      else denied.push(name)
-    } catch (err) {
-      $.ui.log(`${name} not reset: ${String(err)}`)
-      denied.push(name)
-    }
-  }
-  return resetReport(changed, denied)
-}
-
-const command = async ($: EngineInterface, config: Config, args: string) => {
+const command = async ($: EngineInterface, config: Config, unknown: readonly string[], args: string) => {
   const words = args.trim().split(/\s+/)
   const verb = words[0]?.toLowerCase() ?? ''
   // A real question stays up: taken down from here, the core would still act on it when its time ran out.
@@ -761,13 +740,6 @@ const command = async ($: EngineInterface, config: Config, args: string) => {
     if (shown !== null) return { text: `Showing the band as "${words[1]}". /bell show off puts the real one back.` }
     return { text: words[1] === 'off' ? 'The band shows the real state again.' : 'Usage: /bell show calm | act | cold | intro | off' }
   }
-  if (verb === 'reset') {
-    try {
-      return { text: await reset($) }
-    } catch (err) {
-      return { text: `The options could not be read: ${String(err)}` }
-    }
-  }
   if (verb === 'log') {
     const count = Number(words[1] ?? LOG_SHOWN)
     if (!(Number.isInteger(count) && count >= 1 && count <= LOG_KEEP)) return { text: `Usage: /bell log [count], 1 to ${LOG_KEEP}.` }
@@ -783,13 +755,14 @@ const command = async ($: EngineInterface, config: Config, args: string) => {
   await queue
   const state = (await read($, machine)) ?? initialState(config)
   const usage = await $.session.usage()
-  return { text: statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($) }, extension) }
+  return { text: statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($), unknown }, extension) }
 }
 
 // The plugin's hooks. `extend` is how a plugin built on this one adds to it: its own hooks module calls this
 // from its `register`. The open plugin has none.
 export const registerWith = (on: Parameters<Register>[0], options: Parameters<Register>[1], extend: Extend) => {
   const config = resolveConfig(options)
+  const unknown = unknownWords(options)
   extension = extend(options)
   texts = choiceTexts(extension)
 
@@ -804,7 +777,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     return next(e)
   })
 
-  on('command.run', { command: 'bell' }, ($, e, next) => (isYielding ? next(e) : command($, config, e.args)))
+  on('command.run', { command: 'bell' }, ($, e, next) => (isYielding ? next(e) : command($, config, unknown, e.args)))
 
   // The session asks for a compaction. Nothing is compacted inside a turn: the request is noted and taken
   // up when the turn ends.
@@ -825,7 +798,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       return { result: withdrawAnswer(hadRequest) }
     }
     const isAllowed = isWatching && config.enabled && config.sessionCompact !== 'off'
-    const asked = e as { countdown?: unknown; userAsked?: unknown; then?: unknown }
+    const asked = e as { countdown?: unknown; userAsked?: unknown; resumeWith?: unknown; then?: unknown }
     let wakes: Wake = 'none'
     // That the user asked is the session's word: it is taken only in a turn the user started.
     const countdownMs = countdownOf(asked.countdown, asked.userAsked === true && turnBy === 'person')
@@ -841,7 +814,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
         wakeText = ''
       }
       // The note passed last counts; a call without one leaves the earlier note standing.
-      const wanted = wakeOf(asked.then)
+      // `then` is what the parameter was called before 0.2.7: a session that read the older skill still passes it.
+      const wanted = wakeOf(asked.resumeWith) || wakeOf(asked.then)
       if (wanted !== '') {
         wakeText = wakesInRow < WAKES_MAX ? wanted : ''
         wakes = wakeText !== '' ? 'kept' : 'capped'

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_COMPACT_INSTRUCTIONS, DEFAULT_PING_PROMPT, DEFAULT_PREPARE_PROMPT, OPTION_DEFAULTS, resetReport, resolveConfig } from '../../core/config'
+import { DEFAULT_COMPACT_INSTRUCTIONS, DEFAULT_PING_PROMPT, DEFAULT_PREPARE_PROMPT, OPTION_DEFAULTS, WORDS, resolveConfig, unknownWords } from '../../core/config'
 import { TTL_1H, TTL_5M } from '../../core/timing'
 
 test('with no options the plugin runs the prepare-compact preset', () => {
@@ -110,8 +110,23 @@ test('the table of defaults is what the configuration resolves to with nothing s
   }
 })
 
-test('a reset says what it put back and what it could not', () => {
-  expect(resetReport([], [])).toBe('Every option already has its default.')
-  expect(resetReport(['mode', 'ttl'], [])).toBe('Put back to the default: mode, ttl.')
-  expect(resetReport([], ['ttl'])).toBe('Not changed, Claude Code refused: ttl.')
+test('an option set to a word it does not take is named, with the words it takes and the default used', () => {
+  expect(unknownWords({})).toEqual([])
+  expect(unknownWords(OPTION_DEFAULTS)).toEqual([])
+  expect(unknownWords({ mode: 'Keep', sessionCompact: 'confirm', display: 7 })).toEqual([
+    'mode is set to "Keep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used',
+    'display is set to 7, which is not one of band, status, both, off; the default, band, is used',
+  ])
+  // Under a preset the two options of the custom mode decide nothing: no default of theirs is used, none is named.
+  expect(unknownWords({ mode: 'keep', ask: 'evry', renewMethod: 'frk' })).toEqual([])
+  expect(unknownWords({ ask: 'evry' })).toEqual([])
+  expect(unknownWords({ mode: 'custom', ask: 'evry', renewMethod: 'frk' })).toEqual([
+    'ask is set to "evry", which is not one of first, every, never; the default, first, is used',
+    'renewMethod is set to "frk", which is not one of fork, none; the default, fork, is used',
+  ])
+  // Every word the table names is taken as it is, and the default of each option is one of its words.
+  for (const [name, words] of Object.entries(WORDS)) {
+    for (const word of words) expect({ name, word, said: unknownWords({ [name]: word }) }).toEqual({ name, word, said: [] })
+    expect({ name, has: (words as readonly unknown[]).includes(OPTION_DEFAULTS[name]) }).toEqual({ name, has: true })
+  }
 })

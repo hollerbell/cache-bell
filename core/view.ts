@@ -69,7 +69,7 @@ export const formatIdle = (ms: number): string => {
 
 // What the plugin's own compaction did, for whoever comes back to the session.
 export const compactedText = (done: NonNullable<State['lastCompaction']>): string => {
-  const sizes = done.before !== null && done.after !== null ? ` ${formatTokens(done.before)} → ${formatTokens(done.after)} tokens` : ''
+  const sizes = done.before !== null && done.after !== null ? ` ${formatCount(done.before)} → ${formatCount(done.after)} tokens` : ''
   const idle = done.idleMs === null ? '' : ` after ${formatIdle(done.idleMs)} idle`
   return `compacted${sizes}${idle} · /bell log`
 }
@@ -78,14 +78,14 @@ export const compactedText = (done: NonNullable<State['lastCompaction']>): strin
 export const grouped = (n: number): string => String(n).replace(/\B(?=(\d{3})+$)/g, ' ')
 
 // A size in tokens as short as it reads: 950, 144k, 1.2M.
-export const formatTokens = (tokens: number): string => {
+export const formatCount = (tokens: number): string => {
   if (tokens < 1000) return String(tokens)
   return tokens < 999500 ? `${Math.round(tokens / 1000)}k` : `${(tokens / 1000000).toFixed(1)}M`
 }
 
 // What a cold cache costs: the context the next message sends again, by its size when that is known.
 export const resent = (contextTokens: number | null): string =>
-  contextTokens === null ? 'the next message re-sends the whole context' : `the next message re-sends ${formatTokens(contextTokens)} tokens uncached`
+  contextTokens === null ? 'the next message re-sends the whole context' : `the next message re-sends ${formatCount(contextTokens)} tokens uncached`
 
 // What the band says while the plugin itself is at work.
 const WORKING = { RENEWING: 'renewing the prompt cache', PREPARING: 'announcing the compaction', COMPACTING: 'compacting' } as const
@@ -164,7 +164,8 @@ const TTL_SOURCE_TEXT = {
 } as const
 
 // version: the plugin's own, as its manifest states it; left out when it could not be read
-export type Extra = { contextTokens: number | undefined; version?: string | undefined }
+// `unknown` are the rows about options set to a word they do not take (core/config.ts).
+export type Extra = { contextTokens: number | undefined; version?: string | undefined; unknown?: readonly string[] }
 
 // The version a manifest states, from the manifest's text; undefined when it states none or cannot be read.
 export const versionOf = (manifest: string): string | undefined => {
@@ -211,6 +212,7 @@ export const statusReport = (state: State, now: number, config: Config, extra: E
   if (config.maxRenewalsAsked !== null) {
     rows.push(`maxRenewals is set to ${config.maxRenewalsAsked}, outside 0 to ${RENEWALS_CAP}: ${config.maxRenewals} is used`)
   }
+  rows.push(...(extra.unknown ?? []))
   return rows.join('\n')
 }
 

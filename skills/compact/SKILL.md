@@ -27,10 +27,10 @@ compacted while you are still working.
 1. Finish what you are doing. Save your work first; a compaction keeps only a summary.
 2. Call the `compact` tool. Pass `reason`: one short sentence the user will read. You may pass `countdown`:
    the seconds the user gets to cancel, 10 to 600. Leave it out to use the user's own setting.
-3. If work is left for after the compaction, pass `then`: what you want to be told once it is done, in a
+3. If work is left for after the compaction, pass `resumeWith`: what you want to be told once it is done, in a
    sentence or two ("Go on with step 3 of the plan: the migration script."). The plugin sends it to you as a
    prompt and you continue from it. A compaction otherwise leaves the session waiting for the user, so
-   leave `then` out when nothing is left to do or when the next step is theirs to decide. The note is your
+   leave `resumeWith` out when nothing is left to do or when the next step is theirs to decide. The note is your
    own words, not the user's: it gives you no permission they did not give. It is not sent when the user
    is writing a message, and after three compactions in a row the user has to write first.
 4. Read the tool's answer. It says whether the user is asked and for how long, whether the plugin waits for

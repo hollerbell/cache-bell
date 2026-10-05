@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.6](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 249 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.7](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 252 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.6, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.7, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -80,7 +80,6 @@ changes between releases). Tested on Windows (terminal); macOS and Linux are not
 | `/bell log [count]` | The last compactions, ten when no count is given, 200 at most. |
 | `/bell demo [seconds] [bg] [stay]` | Shows the question for that many seconds (1 to 600, 30 when none is given) and sends nothing. `bg` swings the background instead of the text; `stay` keeps the question up when you send a message. |
 | `/bell show calm\|act\|cold\|intro` | Holds the band in one of its looks, or puts the first-run notice up, for a screenshot. `/bell show off` puts the real band back. |
-| `/bell reset` | Puts every option of the plugin back to its default, and says which it changed. |
 
 Started with the environment variable `CACHE_BELL_DEMO=30`, a session shows the demo question by itself,
 for 30 seconds; `CACHE_BELL_DEMO="30 bg"` swings the background.
@@ -97,8 +96,8 @@ Set them in `/config` (rows named `cache-bell.*`) or in `settings.json` under
 | :- | :- | :- |
 | `enabled` | `true` | Off pauses the plugin without uninstalling it: it shows and sends nothing. |
 | `mode` | `prepare-compact` | The preset, see [What it does on its own](#what-it-does-on-its-own-and-what-it-sends). |
-| `ask`, `maxRenewals`, `renewMethod`, `prepareBeforeCompact`, `compact` | | The behaviour under `mode: custom`. |
-| `preparePrompt` | a one-sentence announcement | What the session is told before a compaction. Empty = nothing. |
+| `ask`, `maxRenewals`, `renewMethod`, `prepareBeforeCompact`, `compact` | | The behaviour under `mode: custom`. `ask`: `first`, `every` or `never`. `renewMethod`: `fork` or `none`. |
+| `preparePrompt` | `This conversation will be compacted right after this turn. Nothing is needed from you: a one-line reply is enough.` | What the session is told before a compaction. Empty = nothing. |
 | `pingPrompt` | `This request only keeps the prompt cache warm. Answer with the single word: ok` | The prompt of a renewal. |
 | `compactInstructions` | empty | Instructions for the summary, as after `/compact`; `{time}` and `{idle}` are filled in. |
 | `ttl` | `auto` | `5m` or `1h` sets the cache lifetime by hand. |
@@ -265,7 +264,8 @@ the Claude Code configuration directory), the last 200 entries, for all sessions
 ## Privacy
 
 Cache Bell makes no network connections of its own: its requests go to the model through Claude Code, like
-your own messages, and nothing else leaves the machine.
+your own messages, and nothing else leaves the machine. Those requests are the renewals, the announcement
+before a compaction, the compaction itself, and the note sent back after it.
 
 What it reads:
 
@@ -278,14 +278,28 @@ What it reads:
   only the end is read: what was appended since the last read, no less than 64 KiB and 1 MiB at the most.
   For that the plugin starts `tail` (PowerShell on Windows);
 - Claude Code's configuration rows (the `/config` menu). The mods API hands a plugin all of them as one list;
-  it uses the theme, to pick colours for a light or a dark background, and on `/bell reset` its own options.
-  The other rows are not used, kept or logged;
+  it uses the theme, to pick colours for a light or a dark background. The other rows are not used, kept
+  or logged;
 - changes of the prompt box, as you type: while a question is open, to see whether the box holds one of
   the question's digits (when a second digit is typed after the first, it puts that digit alone into the
   box); at any time, to note when you last typed. What you typed is not kept or logged, only the time;
-- the list of the session's subagents, for whether one still runs.
+- the list of the session's subagents, for whether one still runs;
+- every message that is sent, at the moment it is sent: its text and where it comes from (you, another
+  session, a background task, a plugin). The text is compared with the digits of an open question and with
+  the plugin's own prompts, and is not kept or logged. A message that is exactly a digit of the open
+  question is your answer: the plugin takes it and does not let it reach Claude;
+- when each request to the model is sent, when a turn starts and ends and how it ended, and each compaction
+  with its sizes before and after: the times, the counts and the reasons, nothing of what was said;
+- the size of the context in tokens, as Claude Code counts it;
+- the session id, for its first eight characters in the log of compactions;
+- the path of the session's transcript file, which Claude Code hands over at the end of a turn;
+- the cache TTL Claude Code reports when you switch the model;
+- its own manifest (`plugin.json`), for the version `/bell status` shows;
+- one value another plugin may keep in the session's state: whether the plugin built on this one
+  (`holler-bell`) runs in the session. When it does, Cache Bell stands down: it shows nothing, asks nothing
+  and compacts nothing.
 
-What it writes, all of it in its own store (a JSON file of the plugin under the Claude Code configuration
+What it writes. In its own store (a JSON file of the plugin under the Claude Code configuration
 directory; with Claude Code 2.1.288 in `plugins/store/`):
 
 - that the first-run notice was seen;
@@ -294,16 +308,46 @@ directory; with Claude Code 2.1.288 in `plugins/store/`):
   Claude gave as its reason when it asked for the compaction (at most 200 characters; nothing else of the
   conversation). The log holds the newest 200 entries, older ones are dropped.
 
+Elsewhere:
+
+- in the session's state, which Claude Code keeps for plugins: where the plugin stands (the phase, the
+  times of the last request and of the next step, the cache TTL and where it comes from, the size of the
+  context, the counts of renewals and questions) and the path of the transcript file. Nothing of the
+  conversation;
+- in Claude Code's log, a line when something fails or is not done: the transcript or the settings could
+  not be read, a renewal or a compaction failed, a prompt of the plugin's was not sent. A line holds the
+  error as Claude Code gave it, which may name a file's path, and nothing of the conversation.
+
 What it only holds in memory: the note Claude may leave with a compaction request. The plugin keeps it
 until the compaction is done or called off, sends it back as a prompt after a compaction that went
 through, unless one of the cases named above holds, and does not write it anywhere itself. Claude Code
 records the request and the prompt in the session's transcript on this machine, as it does every tool
 call and prompt.
 
-It writes nothing to `settings.json` on its own and never asks for credentials. `/bell reset` asks Claude
-Code to put the plugin's own options back to their defaults, the way the `/config` menu would. To delete what it kept, delete its
-file in the store. It is kept until you do, except that the log drops entries
-beyond the newest 200.
+What it changes in the transcript, through the interface Claude Code gives plugins for it: two notices
+Claude Code writes there itself. The line saying that a hook dropped a prompt, written when you answer a
+question with a digit, is replaced by a line that names the choice. The line Claude Code writes after it
+loaded the plugin again is cut to its first part, without the list of hooks. No other line is touched.
+
+What its prompts carry. The announcement before a compaction carries the text of the option `preparePrompt`
+and nothing else; its default is in the table of options. A renewal carries the text of the option
+`pingPrompt`. The note sent back after a compaction carries Claude's own note, between sentences of the
+plugin that say whose note it is. A compaction carries the instructions of the option
+`compactInstructions`, when it is set, with the time filled in. Nothing the plugin reads from a file goes
+into any of them.
+
+What it hooks. It serves two things of its own through hooks: the command `/bell` (a hook on
+`command.run`, for that command only) and the tool `compact`, which it registers itself (a hook on
+`tool.call`, for that tool only; the hook answers in the tool's place, since the tool has no other code).
+It answers no other command and no other tool, and takes no permission decision. Its other hooks on events
+that are also calls: `prompt.submit`, for the messages that are sent, and `session.append`, for the two
+notices in the transcript, both as said above; `config.set`, for the theme only, passed on unchanged;
+`session.compact`, passed on unchanged, to log the compaction. It listens to three of Claude Code's hook
+events and passes each on unchanged: `Stop`, for the path of the transcript; `SessionStart`, to learn that
+a compaction or a `/clear` happened; `PostModelSwitch`, for the cache TTL of the new model.
+
+It writes nothing to `settings.json` and never asks for credentials. To delete what it kept, delete its
+file in the store. It is kept until you do, except that the log drops entries beyond the newest 200.
 
 ## Troubleshooting
 
@@ -319,8 +363,8 @@ beyond the newest 200.
 - **The band says the lifetime is not known yet.** The transcript could not be read; on Windows a very
   busy machine can make PowerShell too slow to answer. The plugin tries again on its own and until then
   does not ask, renew or compact. To stop depending on the read, set `ttl` to `5m` or `1h`.
-- **An option does not seem to apply.** `/bell status` prints the mode in use; `/bell reset` puts every
-  option back to its default.
+- **An option does not seem to apply.** `/bell status` prints the mode in use. If an option is set to a word
+  it does not take, the status names the option and the words it takes, and the default is used instead.
 - **The plugin refuses to load after a Claude Code update.** The mods API is early access and changes
   between releases; see the requirements under [Quick start](#quick-start).
 
@@ -422,7 +466,7 @@ Cache Bell does not need it and is MIT-licensed.
 
 MIT, see [LICENSE](LICENSE).
 
-"Holler Bell", "Cache Bell" and the h⣿ mark are trademarks of FEO digital agency s.r.o. The MIT license covers the code. It does not cover these marks or the logo files `docs/hb-mark-light.svg` and `docs/hb-mark-dark.svg`, which are © FEO digital agency s.r.o., all rights reserved; you may redistribute them unchanged as part of this repository. If you distribute a modified version, please remove or replace the name and the
+"Holler Bell", "Cache Bell" and the h⣿ mark are trademarks of FEO digital agency s.r.o. The MIT license covers the code. It does not cover these marks or the logo files hb-mark-light.svg and hb-mark-dark.svg in the docs folder and icon.png in the .claude-plugin folder, which are © FEO digital agency s.r.o., all rights reserved; you may redistribute them unchanged as part of this repository. If you distribute a modified version, please remove or replace the name and the
 mark.
 
 From the Holler Bell team. Not affiliated with, endorsed by or sponsored by Anthropic or OpenAI.
