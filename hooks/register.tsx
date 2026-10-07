@@ -17,7 +17,7 @@ import type { Cause, LogEntry } from '../core/log'
 import { parseTtl, ttlFromSettings } from '../core/timing'
 import { digestOf, errorCode, noticeHead, problemReport } from '../core/report'
 import type { Digest } from '../core/report'
-import { lastRequestOf, tailCommand, ttlFromTranscript } from '../core/transcript'
+import { isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript } from '../core/transcript'
 import type { Action, AskReason, Config, Hold, Observation, State } from '../core/types'
 import { BAND_PREFIX, INTRO_KEY, INTRO_SEEN, MARK, PALETTE, PLUGIN, band, introOf, lookOf, sampleBand, statusEntry, statusReport, versionOf } from '../core/view'
 import type { Band, Intro, Look } from '../core/view'
@@ -66,6 +66,13 @@ let transcriptNo = 0
 // What reached this instance of the plugin, for /bell report: where a session's transcript is never named,
 // the counts say which event did not come or came without the path.
 const seen = { starts: 0, startsWithPath: 0, stops: 0, stopsWithPath: 0, requests: 0 }
+// Where Claude Code's own events do not reach the plugin, nothing names the transcript: the plugin then
+// looks for it by the session's id, a moment after the session started and after each turn, so an event
+// that does come goes first. `isNamedByEvent`: an event named it in this instance; `isFoundById`: the path
+// in use was found by the id.
+let findAt: number | null = null
+let isNamedByEvent = false
+let isFoundById = false
 let drawn = ''
 // Whether what a reload left behind in the state has been dealt with: once, at the first observation.
 let isRecovered = false
@@ -227,6 +234,11 @@ const tick = async ($: EngineInterface, config: Config) => {
     }
   }
   // A read that failed, or was put off, is done without waiting for the next turn: an idle session has none.
+  if (findAt !== null && now >= findAt) {
+    findAt = null
+    // Of what went wrong only its code: the text may hold the path, and with it the home directory.
+    await findTranscript($, config).catch(err => noted($, `transcript not found: ${errorCode(String(err))}`))
+  }
   if (rereadAt !== null && now >= rereadAt) void readTranscriptTtl($, config, transcriptPath).catch(err => noted($, `transcript not read: ${String(err)}`))
 }
 
@@ -353,6 +365,41 @@ const resumed = async ($: EngineInterface, config: Config, e: { transcript_path?
   if (lastRequest === null && typeof e.seconds_since_last_response === 'number' && e.seconds_since_last_response >= 0) lastRequest = now - e.seconds_since_last_response * 1000
   if (lastRequest === null) return
   await observe($, config, { kind: 'resumed', lastRequestAt: lastRequest, contextTokens: typeof e.context_tokens === 'number' ? e.context_tokens : undefined })
+}
+
+// The transcript by the session's id, where no event named it: the file Claude Code would keep for this
+// session in the directory it runs in or started in. A session found so with nothing known of its cache
+// was resumed in a process that was told nothing: it is taken up as one. Otherwise the turn's read is done.
+// With reading the transcript switched off nothing is looked for: the path would serve no read.
+const FIND_AFTER_MS = 2000
+const findTranscript = async ($: EngineInterface, config: Config) => {
+  if (isNamedByEvent || !config.readTranscript) return
+  // Claude Code's own directory: the one it is told, or `.claude` in the home directory, which Windows names
+  // in USERPROFILE. A variable set to nothing counts as not set.
+  const told = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
+  let home = ''
+  if (told === '') home = ((await $.env.get('OS')) === 'Windows_NT' ? await $.env.get('USERPROFILE') : await $.env.get('HOME')) ?? ''
+  const configDir = told !== '' ? told : home === '' ? '' : `${home}/.claude`
+  const id = await $.session.id()
+  let found: string | undefined
+  for (const dir of [await $.session.root(), await $.session.cwd()]) {
+    const path = transcriptPathOf(configDir, dir, id)
+    if (path !== null && (await $.fs.exists(path))) {
+      found = path
+      break
+    }
+  }
+  if (found === undefined || isNamedByEvent) return
+  // The path kept from before a reload is this file in an event's spelling: it stays as it is.
+  transcriptPath ??= (await read($, transcript)) ?? undefined
+  if (transcriptPath !== undefined && isSamePath(transcriptPath, found)) found = transcriptPath
+  else isFoundById = true
+  const state = await read($, machine)
+  if (state === null || (state.phase === 'UNKNOWN' && state.anchorAt === null)) await resumed($, config, { transcript_path: found })
+  else {
+    await nameTranscript($, found)
+    await readTranscriptTtl($, config, found)
+  }
 }
 
 // Safe to call any number of times: a reload runs session.start again with the old timers already dropped.
@@ -756,6 +803,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
   }
   if (await yields($)) return
   ensureStarted($, config)
+  findAt = (await $.clock.now()) + FIND_AFTER_MS
   await readLook($)
   await showIntro($, config)
   try {
@@ -871,7 +919,7 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
     },
     askedTtlMs,
     contextTokens,
-    transcript: { isKnown: path !== undefined && path !== '', exists, size, readAt, failed: unread, rereadAt },
+    transcript: { isKnown: path !== undefined && path !== '', isById: isFoundById, exists, size, readAt, failed: unread, rereadAt },
     events: { ...seen },
     tail,
     notices,
@@ -950,7 +998,11 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
   // A /clear ends the conversation and starts no new session.start: forget what was known of the cache.
   on('session.end', async ($, e, next) => {
-    if (isWatching && (e.reason === 'clear' || e.reason === 'resume')) await cleared($, config)
+    if (isWatching && (e.reason === 'clear' || e.reason === 'resume')) {
+      await cleared($, config)
+      // The conversation that follows has another transcript: where no event names it, it is looked for.
+      findAt = (await $.clock.now()) + FIND_AFTER_MS
+    }
     return next(e)
   })
 
@@ -1127,6 +1179,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (isWatching && e.agentId === undefined) {
+      if (!isNamedByEvent) findAt = (await $.clock.now()) + FIND_AFTER_MS
       await observe($, config, { kind: 'turn-complete', contextTokens: (await sizeNow($)) ?? undefined, isAborted: e.isAborted || e.reason !== 'answer', isFailed: e.reason === 'error', hold: await holdNow($, await read($, machine)) })
       // What explained a compaction is forgotten once nothing is left for it to explain: no question, no
       // step of the plugin's own, nothing waiting.
@@ -1148,6 +1201,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     seen.stops += 1
     if (path !== '') seen.stopsWithPath += 1
     if (isWatching && path !== '') {
+      isNamedByEvent = true
+      isFoundById = false
       // What fails here must not keep the other Stop hooks from running.
       try {
         await nameTranscript($, path)
@@ -1182,10 +1237,15 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // A compaction this hook did not see (one a plugin ran) still ends with a SessionStart of source compact.
   on('classic.SessionStart', async ($, e, next) => {
     seen.starts += 1
-    if (typeof e.transcript_path === 'string' && e.transcript_path !== '') seen.startsWithPath += 1
+    if (typeof e.transcript_path === 'string' && e.transcript_path !== '') {
+      seen.startsWithPath += 1
+      isNamedByEvent = true
+      isFoundById = false
+    }
     if (isWatching && e.source === 'compact') await observe($, config, { kind: 'compacted' })
     if (isWatching && e.source === 'clear') await cleared($, config)
     if (isWatching && (e.source === 'resume' || e.source === 'fork')) await resumed($, config, e)
+    else if (isWatching && typeof e.transcript_path === 'string' && e.transcript_path !== '') await nameTranscript($, e.transcript_path)
     return next(e)
   })
 

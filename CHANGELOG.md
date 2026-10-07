@@ -2,6 +2,15 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.13
+
+- Where Claude Code's own events (session start, end of turn) do not reach the plugin, nothing told it
+  where the session's transcript is: the cache's lifetime stayed the assumed five minutes, and a resumed
+  session showed "unknown" until its first turn. The plugin now looks for the transcript itself, by the
+  session's id in Claude Code's folder, shortly after the session starts and after each turn, and uses the
+  file only when it is there. An event that names the transcript still goes first. `/bell report` then
+  says `Transcript: path known yes, found by the session's id`.
+
 ## 0.2.12
 
 - The plugin notes the path of the session's transcript as soon as a turn ends, before the Stop hooks of

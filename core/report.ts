@@ -98,7 +98,7 @@ export type ReportFacts = {
   // what the settings and the environment ask for, in milliseconds; null = nothing
   askedTtlMs: number | null
   contextTokens: number | undefined
-  transcript: { isKnown: boolean; exists: boolean | null; size: number | null; readAt: number | null; failed: number; rereadAt: number | null }
+  transcript: { isKnown: boolean; isById: boolean; exists: boolean | null; size: number | null; readAt: number | null; failed: number; rereadAt: number | null }
   // how many of Claude Code's events reached this instance of the plugin, and how many named the transcript
   events: { starts: number; startsWithPath: number; stops: number; stopsWithPath: number; requests: number }
   // the end of the transcript, or why it was not read (the plugin's own words); null = there was nothing
@@ -163,7 +163,7 @@ export const problemReport = (state: State, now: number, config: Config, facts: 
   const { transcript } = facts
   rows.push(
     [
-      `Transcript: path known ${yesNo(transcript.isKnown)}`,
+      `Transcript: path known ${yesNo(transcript.isKnown)}${transcript.isKnown && transcript.isById ? ", found by the session's id" : ''}`,
       `exists ${transcript.exists === null ? 'not asked' : yesNo(transcript.exists)}`,
       `size ${transcript.size === null ? 'unknown' : `${grouped(transcript.size)} bytes`}`,
       `read for the TTL ${ago(now, transcript.readAt)}`,

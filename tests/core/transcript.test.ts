@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { TTL_1H, TTL_5M } from '../../core/timing'
-import { lastRequestOf, tailCommand, ttlFromTranscript, ttlOfLine } from '../../core/transcript'
+import { isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript, ttlOfLine } from '../../core/transcript'
 
 // A transcript row as Claude Code 2.1.288 writes it, cut down to what matters here.
 const assistant = (short: unknown, long: unknown, extra: Record<string, unknown> = {}): string =>
@@ -153,4 +153,21 @@ test('a conversation compacted after its last response has no request worth dati
   expect(lastRequestOf([...before, boundary, summary, at('08:30:00', 'user'), at('08:30:05', 'assistant')].join('\n'))).toBe(clock(8, 30))
   // The tail begins with the summary's answer: what it answered is not in it.
   expect(lastRequestOf([boundary, summary, at('08:30:05', 'assistant')].join('\n'))).toBeNull()
+})
+
+test('the transcript of a session by its id: the folder is the directory with every other character as a dash', () => {
+  expect(transcriptPathOf('/srv/jane/.claude', '/srv/jane/my project_1.x', 'abcd1234-0000-4000-8000-000000000000')).toBe(
+    '/srv/jane/.claude/projects/-srv-jane-my-project-1-x/abcd1234-0000-4000-8000-000000000000.jsonl',
+  )
+  expect(transcriptPathOf('D:\\people\\jane\\.claude\\', 'D:\\work\\klient', 'abcd')).toBe('D:\\people\\jane\\.claude/projects/D--work-klient/abcd.jsonl')
+  // An id that could leave the folder, and a place that is not known, give no path.
+  expect(transcriptPathOf('/srv/jane/.claude', '/work', '../../etc/passwd')).toBeNull()
+  expect(transcriptPathOf('', '/work', 'abcd')).toBeNull()
+  expect(transcriptPathOf('/srv/jane/.claude', '/work/', 'abcd')).toBe('/srv/jane/.claude/projects/-work/abcd.jsonl')
+  // A letter with an accent is one dash, composed (NFC) or decomposed (NFD, as macOS names files).
+  expect(transcriptPathOf('/srv/jane/.claude', '/work/kav\u00E1rna', 'abcd')).toBe('/srv/jane/.claude/projects/-work-kav-rna/abcd.jsonl')
+  expect(transcriptPathOf('/srv/jane/.claude', '/work/kava\u0301rna', 'abcd')).toBe('/srv/jane/.claude/projects/-work-kav-rna/abcd.jsonl')
+  expect(isSamePath('D:\\People\\jane\\.claude\\projects\\D--work\\abcd.jsonl', 'D:\\people\\jane/.claude/projects/D--work/abcd.jsonl')).toBe(true)
+  expect(isSamePath('/srv/jane/a.jsonl', '/srv/jane/b.jsonl')).toBe(false)
+  expect(transcriptPathOf('/srv/jane/.claude', '', 'abcd')).toBeNull()
 })
