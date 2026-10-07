@@ -2,6 +2,26 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.13
+
+- Where Claude Code's own events (session start, end of turn) do not reach the plugin, nothing told it
+  where the session's transcript is: the cache's lifetime stayed the assumed five minutes, and a resumed
+  session showed "unknown" until its first turn. The plugin now looks for the transcript itself, by the
+  session's id in Claude Code's folder, shortly after the session starts and after each turn, and uses the
+  file only when it is there. An event that names the transcript still goes first. `/bell report` then
+  says `Transcript: path known yes, found by the session's id`.
+
+## 0.2.12
+
+- The plugin notes the path of the session's transcript as soon as a turn ends, before the Stop hooks of
+  other plugins run, and when the transcript is not read there, a later tick of the plugin reads it.
+  Until now the path was noted after those hooks had returned.
+- `/bell report` has a new row, `Events seen`: how many session starts, ends of turns and requests reached
+  the plugin since it was loaded, and how many of the first two named the transcript. Where a transcript
+  stays unnamed, the row shows which event did not come or came without the path. Counts only, nothing of
+  what was said.
+- README: how to update is now in Quick start as well.
+
 ## 0.2.11
 
 - A session you resume (`claude --resume`, `--continue`, a fork) knows its cache from the start. Until now
@@ -33,7 +53,8 @@ What changed in each version, newest first. `/bell status` says which version ru
   this itself, so `/bell status` no longer names the word.
 - Installed from Anthropic's plugin directory, these options stay rows of free text: the directory does
   not take such a list. A word an option does not take is replaced by the default there too, and
-  `/bell status` says so and names the words the option takes.
+  `/bell status` says so and names the words the option takes; of `ask` and `renewMethod` only in the
+  `custom` mode, the only one they act in.
 
 ## 0.2.8
 

@@ -94,6 +94,23 @@ export const lastRequestOf = (text: string): number | 'compacted' | null => {
 // string each is doubled, or a folder named with one would end the string.
 const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g
 
+// Where Claude Code keeps a session's transcript: under its own directory, in a folder named after the
+// directory the session runs in (every character but a letter or a digit as `-`), in a file named after
+// the session's id. The directory's name is taken in its composed form (NFC): macOS hands it out decomposed,
+// and a letter with an accent would give two dashes for one. Only the file's name is documented, so whoever
+// takes this path asks whether the file is there. Null for an id that is not a plain word: it goes into a path.
+const SESSION_ID = /^[\w-]{1,80}$/
+const ENDING_SLASHES = /[\\/]+$/
+export const transcriptPathOf = (configDir: string, sessionDir: string, sessionId: string): string | null =>
+  SESSION_ID.test(sessionId) && configDir !== '' && sessionDir !== ''
+    ? `${configDir.replace(ENDING_SLASHES, '')}/projects/${sessionDir.normalize('NFC').replace(ENDING_SLASHES, '').replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`
+    : null
+
+// Whether two spellings name one file: an event's path and the one put together here differ in their
+// slashes, and on Windows may differ in case.
+const spelled = (path: string): string => path.replace(/\\/g, '/').toLowerCase()
+export const isSamePath = (one: string, other: string): boolean => spelled(one) === spelled(other)
+
 // The command that prints the last `bytes` of a file too large to read whole. It jumps to the place and
 // reads only that much, so its cost does not grow with the file. The piece may start in the middle of a
 // line, or of a character: that line does not parse and is skipped. On Windows the path goes into the

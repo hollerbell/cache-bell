@@ -33,6 +33,7 @@ const ASSISTANT_1H = JSON.stringify({
 const SUMMARY: SessionMessage[] = [{ role: 'user', text: 'Summary of the conversation so far.', toolUses: [] }]
 
 type Seen = {
+  envAsked: string[]
   toasts: string[]
   commands: string[]
   processes: number
@@ -46,11 +47,11 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0 }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, only: '' }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size = 100): Seen => {
-  const seen: Seen = { toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map([['intro', 1]]) }
+  const seen: Seen = { envAsked: [], toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map([['intro', 1]]) }
   answers.tailExit = 0
   answers.grown = 0
   answers.compactSkip = false
@@ -65,6 +66,8 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   answers.agents = []
   answers.listed = 0
   answers.isListBroken = false
+  answers.isStopBroken = false
+  answers.only = ''
   answers.isCompactBroken = false
   answers.isStoreBroken = false
   answers.rows = {}
@@ -87,7 +90,10 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     }
     return { value: e.value }
   }) as never)
-  mock.env(on, env)
+  on('env.get', ($, e) => {
+    seen.envAsked.push(e.name)
+    return { value: env[e.name] }
+  })
   // What the plugin built on this one keeps in the session; this plugin's own state stays the engine's.
   // `answers.stored` is the state an earlier instance of this plugin left behind, read until this one
   // writes its own: a reload.
@@ -121,10 +127,13 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     return { value: undefined }
   })
   on('fs.stat', () => ({ value: { kind: 'file', size: size + answers.grown, mtimeMs: 0, isLink: false } }))
-  on('fs.exists', () => {
+  // `answers.only`: the one path that exists; '' = every path does. The path may arrive in the host's spelling.
+  on('fs.exists', ($, e) => {
     answers.looked += 1
-    return { value: answers.hasTranscript }
+    return { value: answers.hasTranscript && (answers.only === '' || e.path.split('\\').join('/').endsWith(answers.only)) }
   })
+  on('session.root', () => ({ value: '/work/my project' }))
+  on('session.cwd', () => ({ value: '/work/my project/src' }))
   // The plugin's own manifest, or the session's transcript.
   on('fs.read', ($, e) => ({ value: e.path.endsWith('plugin.json') ? '{ "name": "cache-bell", "version": "0.1.0" }' : transcript }))
   on('process.run', ($, e) => {
@@ -186,7 +195,11 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
   })
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
+  // Another plugin's Stop hook, below this one.
+  on('classic.Stop', () => {
+    if (answers.isStopBroken) throw new Error('another hook failed')
+    return {}
+  })
   on('classic.SessionStart', () => ({}))
   on('classic.PostModelSwitch', () => ({}))
   on('session.compact', ($, e) => {
@@ -313,6 +326,21 @@ test('the TTL comes from the transcript when the turn stops', { options: { showB
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 55 min')
   expect(seen.processes).toBe(0)
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+})
+
+test('where another Stop hook fails the transcript is still named, and a tick reads it', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, `${ASSISTANT_1H}\n`)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  answers.isStopBroken = true
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false }).catch(() => undefined)
+  expect((await run($, 'report')).text).toContain('Transcript: path known yes')
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  // Past the time a hook is given, the read is done without the hook.
+  await clock.advance(16 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect((await run($, 'report')).text).toContain('next try none')
 })
 
 test('with reading the transcript switched off the file is never touched', { options: { showBelowMinutes: 0, readTranscript: false } }, async ($, on) => {
@@ -472,7 +500,8 @@ test('/bell report gathers what an issue needs and shows no address and no path'
   expect(rows[5]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
   expect(rows[6]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
   expect(rows[7]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
-  expect(rows[8]).toBe("The plugin's last notices: none")
+  expect(rows[8]).toBe("Events seen: SessionStart 0, with the transcript's path 0 · Stop 1, with the path 1 · requests of the main thread 1")
+  expect(rows[9]).toBe("The plugin's last notices: none")
   expect(rows.join('\n')).not.toMatch(/gateway|session\.jsonl|\/work/)
   expect(seen.logs).toEqual([])
 })
@@ -630,6 +659,85 @@ test('a resumed session knows its cache at once: the TTL and the last request fr
   // The next turn takes over as ever.
   await turn($, clock, 0)
   expect(await status($)).toMatch(/Last request to the API: 0:00 ago/)
+})
+
+const BY_ID = '/srv/jane/.claude/projects/-work-my-project/abcd1234-0000-4000-8000-000000000000.jsonl'
+
+test('where no event names the transcript, it is found by the session id after the turn and read', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
+  answers.only = BY_ID
+  answers.hasTranscript = false
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  // A new session has no file yet: nothing is found, nothing is taken up.
+  await clock.advance(5 * S)
+  expect(await status($)).toMatch(/State: unknown/)
+  answers.hasTranscript = true
+  await turn($, clock, 0)
+  expect((await run($, 'report')).text).toContain('Transcript: path known no')
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect((await run($, 'report')).text).toContain("Transcript: path known yes, found by the session's id · exists yes")
+  // An event that comes after all names it from then on.
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect((await run($, 'report')).text).toContain('Transcript: path known yes · exists')
+})
+
+test('a session resumed in a process that is told nothing is taken up from the transcript found by its id', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { USERPROFILE: 'D:\\people\\jane', CLAUDE_CONFIG_DIR: '/srv/jane/.claude' }, transcriptOf(850))
+  answers.only = BY_ID
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  expect(await status($)).toMatch(/State: unknown/)
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 14 min ago/)
+})
+
+test('with reading the transcript switched off it is not looked for by the session id either', { options: { readTranscript: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, transcriptOf(850))
+  answers.only = BY_ID
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await clock.advance(3 * S)
+  await turn($, clock, 0)
+  await clock.advance(3 * S)
+  expect(answers.looked).toBe(0)
+  expect(seen.envAsked.filter(name => name === 'HOME' || name === 'USERPROFILE' || name === 'CLAUDE_CONFIG_DIR')).toEqual([])
+  expect((await run($, 'report')).text).toContain('Transcript: path known no')
+})
+
+test('the transcript is also found in the folder of the working directory, and on Windows under USERPROFILE', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { OS: 'Windows_NT', HOME: '/elsewhere', USERPROFILE: '/srv/jane', CLAUDE_CONFIG_DIR: '' }, transcriptOf(850))
+  answers.only = '/srv/jane/.claude/projects/-work-my-project-src/abcd1234-0000-4000-8000-000000000000.jsonl'
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)/)
+})
+
+test('a resume inside a process that is told nothing is taken up by the session id too', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, transcriptOf(850))
+  answers.only = BY_ID
+  answers.hasTranscript = false
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await clock.advance(5 * S)
+  expect(await status($)).toMatch(/State: unknown/)
+  answers.hasTranscript = true
+  await $.session.end({ reason: 'resume', sessionId: 's' } as never)
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)/)
+})
+
+test('with an event that names the transcript the session id is not asked for', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await $.classic.SessionStart({ source: 'startup', transcript_path: '/work/session.jsonl' } as never)
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  await clock.advance(5 * S)
+  expect((await run($, 'report')).text).toContain('Transcript: path known yes · exists')
 })
 
 test('a session resumed after its cache ran out is cold, and nobody is told', async ($, on) => {
