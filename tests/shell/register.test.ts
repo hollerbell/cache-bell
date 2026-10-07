@@ -219,6 +219,13 @@ const turn = async ($: Engine, clock: Clock, lastsMs: number, agentId?: string, 
   await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: lastsMs, isAborted: false, reason: 'answer', ...(agentId === undefined ? {} : { agentId }) })
 }
 
+// One request of the main thread, in a turn that is already running.
+const request = async ($: Engine) => {
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+}
+
 const bandText = async ($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> => {
   const ui = await $.ui.mount(abovePrompt(surface))
   const found = await ui.find({ type: 'Text' })
@@ -230,6 +237,12 @@ const run = ($: Engine, args: string) =>
   $.command.run({ command: 'bell', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
 
 const status = async ($: Engine): Promise<string> => (await run($, 'status')).text ?? ''
+
+// The status asked for while a turn runs: the command answers nothing and the plugin says it as a notice.
+const busyStatus = async ($: Engine, seen: Seen): Promise<string> => {
+  expect(await run($, 'status')).toEqual({})
+  return seen.logs[seen.logs.length - 1] ?? ''
+}
 
 // The log of compactions as the store holds it, the oldest first.
 const logged = (seen: Seen): unknown[] =>
@@ -248,11 +261,11 @@ test('the band counts down from the last request and turns cold', { options: { m
   // The request goes out at T0 and the turn runs 20 s: the countdown started with the request.
   await turn($, clock, 20 * S)
   for (const surface of ['terminal', 'desktop'] as const) {
-    expect(await bandText($, surface)).toBe('h⣿ Cache Bell: prompt cache expires in 4:15')
+    expect(await bandText($, surface)).toBe('h⣿ Cache Bell: prompt cache expires in 4:15 · lifetime 5m assumed, not yet seen in the data')
   }
 
   await clock.advance(254 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01 · lifetime 5m assumed, not yet seen in the data')
   expect(seen.toasts).toEqual([])
 
   await clock.advance(S)
@@ -265,7 +278,7 @@ test('the band counts down from the last request and turns cold', { options: { m
 
   // New work warms it again.
   await turn($, clock, S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:34')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:34 · lifetime 5m assumed, not yet seen in the data')
 })
 
 test('nothing is drawn while a turn runs or a survey shows', async ($, on) => {
@@ -288,7 +301,7 @@ test('a subagent request does not move the anchor', async ($, on) => {
   await turn($, clock, 0)
   await clock.advance(100 * S)
   await turn($, clock, 0, 'agent-1')
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55 · lifetime 5m assumed, not yet seen in the data')
 })
 
 test('the TTL comes from the transcript when the turn stops', { options: { showBelowMinutes: 0 } }, async ($, on) => {
@@ -355,7 +368,7 @@ test('/bell status answers without a turn and refuses what is not there yet', as
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   expect(await status($)).toMatch(/^version 0\.1\.0 · on, mode prepare-compact\nState: unknown/)
   expect((await run($, '')).text).toMatch(/State: unknown/)
-  expect((await run($, 'now')).text).toBe('Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off')
+  expect((await run($, 'now')).text).toBe('Usage: /bell status | report | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off')
   for (const count of ['abc', '0', '201', '1.5', '-3']) expect((await run($, `log ${count}`)).text).toBe('Usage: /bell log [count], 1 to 200.')
   expect((await run($, 'log 200')).text).not.toMatch(/^Usage/)
   expect((await run($, 'log')).text).not.toMatch(/^Usage/)
@@ -415,11 +428,66 @@ test('switched off, the plugin draws nothing and says nothing', { options: { ena
 
 test('a subagent that finishes does not end the main turn', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
-  stubs(on)
+  const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.turn.start({ text: 'hi', turnId: 't' })
+  await request($)
   await turn($, clock, 0, 'agent-1')
-  expect(await status($)).toMatch(/State: busy/)
+  expect(await busyStatus($, seen)).toMatch(/State: busy/)
+})
+
+test('a status asked for while a turn runs is said at once, as a notice of one line', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'hi', turnId: 't' })
+  await request($)
+  await clock.advance(8 * S)
+  // The command itself answers nothing: Claude Code would print it only after the turn.
+  for (const args of ['', 'status']) expect(await run($, args)).toEqual({})
+  expect(seen.logs).toEqual(Array(2).fill('version 0.1.0 · on, mode prepare-compact · State: busy (a turn is running) · Cache TTL: 5m (assumed, not yet seen in the data) · Last request to the API: 0:08 ago · Context: 143 985 tokens'))
+  // The other verbs answer as ever.
+  expect((await run($, 'log')).text).not.toMatch(/^Usage/)
+
+  // Idle again, the command answers by itself.
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 8 * S, isAborted: false, reason: 'answer' })
+  expect(await status($)).toMatch(/State: warm/)
+  expect(seen.logs.length).toBe(2)
+})
+
+test('/bell report gathers what an issue needs and shows no address and no path', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { OS: 'Windows_NT', ANTHROPIC_BASE_URL: 'https://gateway.example.com', CLAUDE_CODE_USE_BEDROCK: '1' }, `${ASSISTANT_1H}\n`)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // Before anything was seen the report still answers.
+  expect((await run($, 'report')).text).toContain('Transcript: path known no · exists not asked · size unknown · read for the TTL never')
+
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  await clock.advance(40 * S)
+  const rows = ((await run($, 'report')).text ?? '').split('\n')
+  expect(rows[1]).toBe('Cache Bell 0.1.0 · Claude Code version not seen · Windows · terminal')
+  expect(rows[2]).toBe('Model: claude-test · Bedrock yes · Vertex no · Foundry no · own API address yes')
+  expect(rows[5]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
+  expect(rows[6]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
+  expect(rows[7]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
+  expect(rows[8]).toBe("The plugin's last notices: none")
+  expect(rows.join('\n')).not.toMatch(/gateway|session\.jsonl|\/work/)
+  expect(seen.logs).toEqual([])
+})
+
+test('/bell report names a transcript that cannot be read and the notice that said so, without the path', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, `${ASSISTANT_1H}\n`, 5 * 1024 * 1024)
+  answers.tailExit = 1
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  const text = (await run($, 'report')).text ?? ''
+  expect(text).toContain('size 5 242 880 bytes · read for the TTL never · failed reads 1 · next try in 0:15')
+  expect(text).toContain('End of the transcript: not read: exited with 1')
+  expect(text).toContain("The plugin's last notices: \n  transcript not read, it is tried again (exited with 1)")
 })
 
 test('a /clear seen as the end of the session forgets the cache', async ($, on) => {
@@ -537,6 +605,102 @@ test('a transcript that is gone in the middle of the tries ends them, and the pl
   await clock.advance(30 * S)
   expect(answers.looked).toBe(looked)
   expect(seen.processes).toBe(1)
+})
+
+// A transcript whose last request went out `secondsAgo` before T0, answered with a write to the hour's cache.
+const dated = (secondsAgo: number, type: string, extra: Record<string, unknown> = {}): string =>
+  JSON.stringify({ type, isSidechain: false, timestamp: new Date(T0 - secondsAgo * S).toISOString(), message: { content: 'hi' }, ...extra })
+const answer = (secondsAgo: number): string =>
+  dated(secondsAgo, 'assistant', { message: { model: 'claude-test', usage: { input_tokens: 2, output_tokens: 9, cache_creation_input_tokens: 900, cache_creation: { ephemeral_1h_input_tokens: 900, ephemeral_5m_input_tokens: 0 } } } })
+const transcriptOf = (secondsAgo: number): string => [dated(secondsAgo, 'user'), answer(secondsAgo - 5), ''].join('\n')
+
+const resume = ($: Engine, extra: Record<string, unknown> = {}) => $.classic.SessionStart({ source: 'resume', transcript_path: '/work/session.jsonl', ...extra } as never)
+
+test('a resumed session knows its cache at once: the TTL and the last request from the transcript', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, transcriptOf(850))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(await status($)).toMatch(/State: unknown/)
+  // Claude Code counts from the response's end, here ten minutes ago; the transcript's request wins.
+  await resume($, { seconds_since_last_response: 600, context_tokens: 48261 })
+  const report = await status($)
+  expect(report).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 14 min ago/)
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 40 min')
+  expect(seen.toasts).toEqual([])
+  // The next turn takes over as ever.
+  await turn($, clock, 0)
+  expect(await status($)).toMatch(/Last request to the API: 0:00 ago/)
+})
+
+test('a session resumed after its cache ran out is cold, and nobody is told', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, transcriptOf(8 * 3600))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 8 * 3600 - 5, context_tokens: 269655 })
+  expect(await status($)).toMatch(/State: cold, expired\nCache TTL: 1h \(read from the transcript\)/)
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expired · the next message re-sends 270k tokens uncached')
+  await clock.advance(60 * S)
+  expect(seen.toasts).toEqual([])
+})
+
+test('where the transcript is not read, a resumed session counts from the time Claude Code gives', { options: { readTranscript: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on, {}, transcriptOf(850))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 120 })
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 5m \(assumed, not yet seen in the data\)\nLast request to the API: 2:00 ago/)
+  expect(answers.looked).toBe(0)
+})
+
+test('with the TTL set in the options the last request still comes from the transcript', { options: { ttl: '5m' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on, {}, transcriptOf(200))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 20 })
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 5m \(set in the plugin options\)\nLast request to the API: 3:20 ago/)
+})
+
+test('a session resumed after a failed request counts from the last one that was answered', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const failed = dated(57, 'assistant', { isApiErrorMessage: true, message: { model: '<synthetic>', usage: { input_tokens: 0, output_tokens: 0 } } })
+  stubs(on, {}, [dated(3 * 3600, 'user'), answer(3 * 3600 - 5), dated(60, 'user'), failed, ''].join('\n'))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 57 })
+  expect(await status($)).toMatch(/State: cold, expired\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 180 min ago/)
+})
+
+test('a session resumed right after a compaction is left alone, whatever time Claude Code gives', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on, {}, [dated(900, 'user'), answer(895), dated(300, 'system', { subtype: 'compact_boundary' }), dated(300, 'user', { isCompactSummary: true }), ''].join('\n'))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 300, context_tokens: 21400 })
+  expect(await status($)).toMatch(/State: unknown[^\n]*\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: none seen/)
+  expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+test('a resume inside the process reads the new transcript at once, though the old one was read a moment ago', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, transcriptOf(1200))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/old.jsonl', stop_hook_active: false })
+  await $.session.end({ reason: 'resume', sessionId: 's' } as never)
+  await resume($, { transcript_path: '/work/session.jsonl', seconds_since_last_response: 30 })
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 20 min ago/)
+})
+
+test('a resume that names no transcript and no time, and one in a session already at work, change nothing', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, transcriptOf(850))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.classic.SessionStart({ source: 'resume' } as never)
+  expect(await status($)).toMatch(/State: unknown/)
+  await $.classic.SessionStart({ source: 'startup', transcript_path: '/work/session.jsonl', seconds_since_last_response: 30 } as never)
+  expect(await status($)).toMatch(/State: unknown/)
+  await turn($, clock, 0)
+  await clock.advance(20 * S)
+  await resume($, { seconds_since_last_response: 3 })
+  expect(await status($)).toMatch(/Last request to the API: 0:20 ago/)
 })
 
 test('a model switch turns the cache cold and brings its TTL', async ($, on) => {
@@ -828,7 +992,7 @@ const ownTurn = ($: Engine, clock: Clock) => turn($, clock, 0, undefined, false)
 test('before the cache runs out the plugin asks, and without an answer renews it', async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(209 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:06')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:06 · lifetime 5m assumed, not yet seen in the data')
 
   await clock.advance(S)
   expect(await question($)).toMatchObject({
@@ -841,7 +1005,7 @@ test('before the cache runs out the plugin asks, and without an answer renews it
   // The time runs out: one silent request beside the conversation, and the countdown starts over from it.
   await clock.advance(30 * S)
   expect(seen.did).toEqual(['fork'])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
   expect(await status($)).toMatch(/State: warm/)
 })
 
@@ -902,7 +1066,7 @@ for (const phase of ['RENEWING', 'PREPARING', 'COMPACTING'] as const) {
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
     await clock.advance(S)
     expect(seen.toasts).toEqual(['The plugin was loaded again in the middle of a step: nothing more is done until you work in this session again.'])
-    expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:33 · nothing will be done')
+    expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:33 · lifetime 5m assumed, not yet seen in the data · nothing will be done')
     await clock.advance(600 * S)
     expect(seen.did).toEqual([])
   })
@@ -931,7 +1095,7 @@ test('the second period is renewed without a question, the third asks again and 
   expect(seen.did).toEqual(['fork'])
 
   await clock.advance(239 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:36')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:36 · lifetime 5m assumed, not yet seen in the data')
   await clock.advance(S)
   expect(seen.did).toEqual(['fork', 'fork'])
 
@@ -971,7 +1135,7 @@ test('each answer to the real question is carried out', async ($, on) => {
   // 3 and Enter: let it expire. Nothing is sent, the band says so, and the cache goes cold in time.
   await edit($, '', 0, 0, '3')
   expect(await enter($, '3')).toEqual({ drop: 'cache-bell: Let it expire' })
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:05 · nothing will be done')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data · nothing will be done')
   await clock.advance(65 * S)
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expired · the next message re-sends 144k tokens uncached')
   expect(seen.did).toEqual([])
@@ -996,7 +1160,7 @@ test('a message from the person closes the real question and starts the countdow
 
   await enter($, 'hello')
   await turn($, clock, 0)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
   expect(seen.did).toEqual([])
   expect(seen.toasts).toEqual([])
 })
@@ -1017,7 +1181,7 @@ test('a small context is left alone', async ($, on) => {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await clock.advance(274 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01 · lifetime 5m assumed, not yet seen in the data')
   expect(seen.did).toEqual([])
 })
 
@@ -1059,10 +1223,10 @@ test('the mark wears the brand colours in the band, whatever the tone of the lin
     ['⣿', '#7ad8f8', true, false],
     // the name in the plain colour, then the message in the tone of the moment
     [' Cache Bell:', undefined, true, false],
-    [' prompt cache expires in 4:35', undefined, false, true],
+    [' prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data', undefined, false, true],
   ])
   await clock.advance(210 * S)
-  expect((await drawn())[3]).toEqual([' prompt cache expires in 1:05', 'yellow', false, false])
+  expect((await drawn())[3]).toEqual([' prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', 'yellow', false, false])
   await clock.advance(65 * S)
   expect((await drawn()).map(run => run[1])).toEqual(['#3aa3b3', '#7ad8f8', undefined, 'cyan'])
 })
@@ -1185,7 +1349,7 @@ test('/bell show holds the band in a look for a screenshot, and off puts the rea
   await clock.advance(100 * S)
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expired · the next message re-sends 144k tokens uncached')
   expect((await run($, 'show off')).text).toBe('The band shows the real state again.')
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55 · lifetime 5m assumed, not yet seen in the data')
   expect((await run($, 'show nonsense')).text).toBe('Usage: /bell show calm | act | cold | intro | off')
   expect(seen.did).toEqual([])
 })
@@ -1259,7 +1423,7 @@ test('on a light theme the mark and the message wear the colours for a light bac
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await clock.advance(210 * S)
-  expect(await inks($)).toEqual([['h', '#073a44'], ['⣿', '#00697a'], [' Cache Bell:', undefined], [' prompt cache expires in 1:05', '#8a5a00']])
+  expect(await inks($)).toEqual([['h', '#073a44'], ['⣿', '#00697a'], [' Cache Bell:', undefined], [' prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', '#8a5a00']])
   await clock.advance(65 * S)
   expect((await inks($))[3]?.[1]).toBe('#005f73')
 
@@ -1290,8 +1454,9 @@ test('an announcement the person interrupts is not followed by a compaction', { 
   expect(seen.did).toEqual(['prepare'])
   expect(await bandText($)).toBe('h⣿ Cache Bell: announcing the compaction…')
 
-  // Esc in the announcement's turn.
+  // Esc in the announcement's turn. A status asked for in it is said at once, as in any turn.
   await $.turn.start({ text: 'announcement', turnId: 'a' })
+  expect(await busyStatus($, seen)).toMatch(/State: warm, announcing the compaction/)
   await $.turn.complete({ turnId: 'a', answer: '', durationMs: 0, isAborted: true, reason: 'aborted' })
   await clock.settle()
   await clock.advance(20 * S)
@@ -1324,7 +1489,7 @@ test('a turn that begins in the second before the compaction takes it back', { o
   await clock.advance(5 * S)
   expect(seen.did).toEqual(['prepare'])
   expect(seen.toasts).toEqual([])
-  expect(await status($)).toMatch(/State: busy/)
+  expect(await busyStatus($, seen)).toMatch(/State: busy/)
 })
 
 // The person typing: one key into the prompt box.
@@ -1346,7 +1511,7 @@ test('a compaction waits while the person types and follows a minute after the l
   await key($)
   await clock.advance(45 * S)
   expect(seen.did).toEqual([])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:30 · compaction waits for you to finish typing')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:30 · lifetime 5m assumed, not yet seen in the data · compaction waits for you to finish typing')
   expect(await status($)).toContain('Compaction waits for you to finish typing')
 
   // 4:19, less than a minute since the last key at 3:20; a second later the minute is over.
@@ -1377,7 +1542,7 @@ test('a compaction waits for a subagent that still runs and follows once it is d
   answers.agents = ['completed', 'running']
   await clock.advance(250 * S)
   expect(seen.did).toEqual([])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:25 · compaction waits for a running subagent')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:25 · lifetime 5m assumed, not yet seen in the data · compaction waits for a running subagent')
 
   answers.agents = ['completed', 'completed']
   await clock.advance(S)
@@ -1842,7 +2007,7 @@ test('the first time on a machine the band says what the plugin does without the
   await enter($, 'hello')
   await turn($, clock, 0)
   expect(seen.store.get('intro')).toBe(1)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
 })
 
 test('OK takes the notice down, and a machine that has seen it is not told again', async ($, on) => {
@@ -2082,15 +2247,14 @@ test('a compaction the timers bring wakes nobody, also after a request that was 
   expect(wakes(seen)).toEqual([])
 })
 
-test('/bell status names an option set to a word it does not take, and the default used instead', { options: { mode: 'kep', display: 'band', ttl: '10m' } }, async ($, on) => {
+// The manifest lists the words: Claude Code hands the plugin the default in place of any other, and says so itself.
+test('an option set to a word it does not take reads as the default', { options: { mode: 'kep', ttl: '10m' } }, async ($, on) => {
   mock.clock(on, { now: T0 })
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const report = await status($)
   expect(report).toContain('mode prepare-compact')
-  expect(report).toContain('mode is set to "kep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used')
-  expect(report).toContain('ttl is set to "10m", which is not one of auto, 5m, 1h; the default, auto, is used')
-  expect(report).not.toContain('display is set')
+  expect(report).not.toContain('is set to')
 })
 
 test('the note is also taken under the name the parameter had before 0.2.7', { options: { compactCountdown: 30 } }, async ($, on) => {

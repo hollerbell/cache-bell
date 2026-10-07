@@ -155,7 +155,7 @@ for (const hold of HOLDS) {
   test(`the band and the status report say that the compaction waits for ${hold}`, () => {
     const waiting = decide(due(), ACT, tick(hold), base).state
     const what = { typing: 'you to finish typing', agent: 'a running subagent' }[hold]
-    expect(band(waiting, ACT, base)).toEqual({ text: `h⣿ Cache Bell: prompt cache expires in 0:35 · compaction waits for ${what}`, tone: 'warn' })
+    expect(band(waiting, ACT, base)).toEqual({ text: `h⣿ Cache Bell: prompt cache expires in 0:35 · lifetime 5m assumed, not yet seen in the data · compaction waits for ${what}`, tone: 'warn' })
     expect(statusReport(waiting, ACT, base, { contextTokens: 150000 })).toContain(`\nCompaction waits for ${what}\n`)
     const gone = decide(waiting, MAX, tick(hold), base).state
     expect(band(gone, MAX, base)?.text).toBe('h⣿ Cache Bell: prompt cache expired, the compaction was postponed · the next message re-sends 150k tokens uncached')
@@ -163,7 +163,7 @@ for (const hold of HOLDS) {
     // On an hour-long cache the line shows while the compaction waits, however much time is left.
     const long = state({ ttlMs: 3600 * S, held: { by: hold, isTold: true } })
     expect(band(state({ ttlMs: 3600 * S }), T0 + S, base)).toBeNull()
-    expect(band(long, T0 + S, base)?.text).toBe(`h⣿ Cache Bell: prompt cache expires in 54 min · compaction waits for ${what}`)
+    expect(band(long, T0 + S, base)?.text).toBe(`h⣿ Cache Bell: prompt cache expires in 54 min · lifetime 1h assumed, not yet seen in the data · compaction waits for ${what}`)
   })
 }
 

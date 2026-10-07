@@ -14,7 +14,7 @@ Replies may come from Bellhop, an automated account of the Holler Bell team that
 
 **What you expected**
 
-**The output of `/bell status`** (its first line is the Cache Bell version; if it shows none, add the version from `claude plugin list`)
+**The output of `/bell report`** (from Cache Bell 0.2.10; with an older version paste `/bell status` instead, and if that shows no version, add the one from `claude plugin list`)
 
 ```
 

@@ -259,3 +259,36 @@ test('a state that did not change is the same object', () => {
   expect(forced).toMatchObject({ ttlMs: TTL_1H, ttlSource: 'config' })
   expect(decide(forced, T0 + S, tick, byHand).state === forced).toBe(true)
 })
+
+test('a resumed session is warm from its last request, or cold without a word when the cache ran out meanwhile', () => {
+  const hour = state({ ttlMs: TTL_1H, ttlSource: 'transcript' })
+  const warmed = decide(hour, T0, { kind: 'resumed', lastRequestAt: T0 - 845 * S, contextTokens: 48261 }, config)
+  expect(warmed.state).toMatchObject({ phase: 'WARM', anchorAt: T0 - 845 * S, workedAt: T0 - 845 * S, contextTokens: 48261, coldReason: null })
+  expect(kinds(warmed.actions)).toEqual(['redraw'])
+
+  const gone = decide(hour, T0, { kind: 'resumed', lastRequestAt: T0 - 8 * 3600 * S }, config)
+  expect(gone.state).toMatchObject({ phase: 'COLD', coldReason: 'expired', anchorAt: T0 - 8 * 3600 * S, contextTokens: null })
+  expect(kinds(gone.actions)).toEqual(['redraw'])
+
+  // Five assumed minutes: four minutes ago is warm, six is not.
+  expect(decide(state(), T0, { kind: 'resumed', lastRequestAt: T0 - 240 * S }, config).state.phase).toBe('WARM')
+  expect(decide(state(), T0, { kind: 'resumed', lastRequestAt: T0 - 360 * S }, config).state.phase).toBe('COLD')
+  // A time ahead of the clock is taken as now.
+  expect(decide(state(), T0, { kind: 'resumed', lastRequestAt: T0 + 60 * S }, config).state).toMatchObject({ phase: 'WARM', anchorAt: T0 })
+})
+
+test('a resume changes nothing where the process has already seen the session at work', () => {
+  for (const known of [warm(), state({ phase: 'BUSY', anchorAt: T0 }), state({ phase: 'COLD', anchorAt: T0, coldReason: 'expired' }), state({ phase: 'DORMANT' }), state({ phase: 'BUSY', resumeTo: 'UNKNOWN' })]) {
+    const { state: after, actions } = decide(known, T0 + 10 * S, { kind: 'resumed', lastRequestAt: T0 - 100 * S, contextTokens: 5 }, config)
+    expect(after).toBe(known)
+    expect(actions).toEqual([])
+  }
+})
+
+test('a resumed session is watched like any other: the question comes when its time does', () => {
+  const acting = resolveConfig({ mode: 'prepare-compact' })
+  const resumed = decide(state({ ttlMs: TTL_1H, ttlSource: 'transcript' }), T0, { kind: 'resumed', lastRequestAt: T0 - 600 * S, contextTokens: 150000 }, acting).state
+  expect(kinds(decide(resumed, T0 + S, tick, acting).actions)).not.toContain('ask')
+  const later = decide(resumed, T0 + 30 * 60 * S, tick, acting)
+  expect(kinds(later.actions)).toContain('ask')
+})

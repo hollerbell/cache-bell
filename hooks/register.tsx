@@ -15,7 +15,9 @@ import { COUNTDOWN_MAX_S, COUNTDOWN_MIN_S, countdownOf, fillInstructions, holdOf
 import { LOG_KEEP, LOG_SHOWN, OWN_CAUSE, isLogEntry, isLogKey, logEntry, logKey, logReport, outdated } from '../core/log'
 import type { Cause, LogEntry } from '../core/log'
 import { parseTtl, ttlFromSettings } from '../core/timing'
-import { tailCommand, ttlFromTranscript } from '../core/transcript'
+import { digestOf, errorCode, noticeHead, problemReport } from '../core/report'
+import type { Digest } from '../core/report'
+import { lastRequestOf, tailCommand, ttlFromTranscript } from '../core/transcript'
 import type { Action, AskReason, Config, Hold, Observation, State } from '../core/types'
 import { BAND_PREFIX, INTRO_KEY, INTRO_SEEN, MARK, PALETTE, PLUGIN, band, introOf, lookOf, sampleBand, statusEntry, statusReport, versionOf } from '../core/view'
 import type { Band, Intro, Look } from '../core/view'
@@ -40,6 +42,9 @@ const TAIL_MIN_BYTES = 64 * 1024
 // only when the model does (which is reported) or when Claude Code falls back to the short cache, and that
 // has to be known before the short cache's time to act.
 const RECHECK_MS = 2 * 60 * 1000
+// How long the end of a large transcript may take to read when a session is resumed: the hook has ten
+// seconds, and a resume without the transcript still has the time Claude Code gives.
+const RESUME_READ_MS = 5000
 // After a read that failed: when it is tried again, the first, the second and every later time.
 const REREAD_MS = [15 * 1000, 60 * 1000]
 const REREAD_LATER_MS = 5 * 60 * 1000
@@ -55,6 +60,9 @@ let readAt: number | null = null
 let unread = 0
 let rereadAt: number | null = null
 let isReading = false
+// Counts the transcripts this process was given: a read that began on one of them and ends after the next
+// was named says nothing of the new one.
+let transcriptNo = 0
 let drawn = ''
 // Whether what a reload left behind in the state has been dealt with: once, at the first observation.
 let isRecovered = false
@@ -102,6 +110,19 @@ let texts: Readonly<Record<string, ChoiceText>> = CHOICES
 
 // An answer nobody has words for is shown by its name.
 const textOf = (choice: Choice): ChoiceText => texts[choice] ?? { label: choice }
+
+// The plugin's own notices go to Claude Code's log; of the last few /bell report keeps the plugin's own
+// words, not what an error or another plugin said in them.
+const NOTICES_KEPT = 8
+const notices: string[] = []
+const noted = ($: EngineInterface, text: string) => {
+  notices.push(noticeHead(text))
+  if (notices.length > NOTICES_KEPT) notices.shift()
+  $.ui.log(text)
+}
+// For /bell report: the surface the session started on and the model of the last request seen.
+let surface: string | undefined
+let lastModel: string | undefined
 
 // The band's text depends on the clock, the state does not change between ticks: redraw only when the text
 // to show really changed.
@@ -151,7 +172,7 @@ const apply = async ($: EngineInterface, config: Config, observation: Observatio
 const observe = ($: EngineInterface, config: Config, observation: Observation): Promise<void> => {
   queue = queue
     .then(() => apply($, config, observation))
-    .catch(err => $.ui.log(`${observation.kind} failed: ${String(err)}`))
+    .catch(err => noted($, `${observation.kind} failed: ${String(err)}`))
   return queue
 }
 
@@ -168,7 +189,7 @@ const agentsNow = async ($: EngineInterface) => {
     return await $.agent.list()
   } catch (err) {
     isListless = true
-    $.ui.log(`subagents not listed, a compaction will not wait for them: ${String(err)}`)
+    noted($, `subagents not listed, a compaction will not wait for them: ${String(err)}`)
     return []
   }
 }
@@ -203,7 +224,7 @@ const tick = async ($: EngineInterface, config: Config) => {
     }
   }
   // A read that failed, or was put off, is done without waiting for the next turn: an idle session has none.
-  if (rereadAt !== null && now >= rereadAt) void readTranscriptTtl($, config, transcriptPath).catch(err => $.ui.log(`transcript not read: ${String(err)}`))
+  if (rereadAt !== null && now >= rereadAt) void readTranscriptTtl($, config, transcriptPath).catch(err => noted($, `transcript not read: ${String(err)}`))
 }
 
 // What the person asked Claude Code for. Settings are read by name: the object can hold secrets.
@@ -220,11 +241,35 @@ const readSettingsTtl = async ($: EngineInterface): Promise<number | null> => {
 const readTail = async ($: EngineInterface, path: string, size: number): Promise<string> => {
   if (size <= FS_READ_LIMIT) return $.fs.read(path)
   const added = readSize !== null && size > readSize ? size - readSize : TAIL_MAX_BYTES
-  const bytes = Math.min(Math.max(added, TAIL_MIN_BYTES), TAIL_MAX_BYTES)
+  return readEnd($, path, Math.min(Math.max(added, TAIL_MIN_BYTES), TAIL_MAX_BYTES))
+}
+
+const readEnd = async ($: EngineInterface, path: string, bytes: number, timeoutMs = 10000): Promise<string> => {
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-  const result = await $.process.run(tailCommand(path, bytes, isWindows), { timeoutMs: 10000 })
+  const result = await $.process.run(tailCommand(path, bytes, isWindows), { timeoutMs })
   if (result.exitCode !== 0) throw new Error(`tail exited with ${result.exitCode}`)
   return result.stdout
+}
+
+// A read that failed is tried again; until one goes through the core is told that the TTL is not read.
+const readFailed = async ($: EngineInterface, config: Config, err: unknown) => {
+  unread += 1
+  rereadAt = (await $.clock.now()) + (REREAD_MS[unread - 1] ?? REREAD_LATER_MS)
+  // Said once for a run of failures, not at every try.
+  if (unread === 1) noted($, `transcript not read, it is tried again: ${String(err)}`)
+  if (config.ttlMs === null) await observe($, config, { kind: 'ttl-unread', isUnread: true })
+}
+
+// Another transcript: what was read of the old one, and what failed on it, says nothing of this one.
+const nameTranscript = async ($: EngineInterface, path: string) => {
+  if (path === transcriptPath) return
+  transcriptPath = path
+  transcriptNo += 1
+  readSize = null
+  readAt = null
+  unread = 0
+  rereadAt = null
+  await update($, transcript, () => path)
 }
 
 // The TTL the API really granted is only in the transcript. It is read while it is not known, and then
@@ -257,21 +302,54 @@ async function readTranscriptTtl($: EngineInterface, config: Config, path: strin
       rereadAt = readAt + RECHECK_MS
       return
     }
+    const no = transcriptNo
     const ttlMs = ttlFromTranscript(await readTail($, path, size))
+    if (no !== transcriptNo) return
     readSize = size
     readAt = now
     unread = 0
     rereadAt = null
     await observe($, config, ttlMs === null ? { kind: 'ttl-unread', isUnread: false } : { kind: 'ttl', ttlMs, source: 'transcript' })
   } catch (err) {
-    unread += 1
-    rereadAt = (await $.clock.now()) + (REREAD_MS[unread - 1] ?? REREAD_LATER_MS)
-    // Said once for a run of failures, not at every try.
-    if (unread === 1) $.ui.log(`transcript not read, it is tried again: ${String(err)}`)
-    await observe($, config, { kind: 'ttl-unread', isUnread: true })
+    await readFailed($, config, err)
   } finally {
     isReading = false
   }
+}
+
+// A session resumed from its transcript (claude --resume, --continue, a fork) starts in a new process that
+// has seen no request. Claude Code names the transcript and how long ago its last response came: the TTL
+// and the time of the last request are read from the transcript, and where it cannot be read, the time
+// Claude Code gave stands in. From there the cache is watched as after any turn.
+const resumed = async ($: EngineInterface, config: Config, e: { transcript_path?: string; seconds_since_last_response?: number; context_tokens?: number }) => {
+  const path = e.transcript_path
+  let lastRequest: number | 'compacted' | null = null
+  if (path !== undefined && path !== '') {
+    await nameTranscript($, path)
+    // Read here and not through the turn's own read: that one skips a TTL set in the options and a file
+    // read a moment ago, and the last request is wanted either way.
+    if (config.readTranscript) {
+      try {
+        if (await $.fs.exists(path)) {
+          const { size } = await $.fs.stat(path)
+          const text = size <= FS_READ_LIMIT ? await $.fs.read(path) : await readEnd($, path, TAIL_MAX_BYTES, RESUME_READ_MS)
+          readSize = size
+          readAt = await $.clock.now()
+          lastRequest = lastRequestOf(text)
+          const ttlMs = ttlFromTranscript(text)
+          if (config.ttlMs === null) await observe($, config, ttlMs === null ? { kind: 'ttl-unread', isUnread: false } : { kind: 'ttl', ttlMs, source: 'transcript' })
+        }
+      } catch (err) {
+        await readFailed($, config, err)
+      }
+    }
+  }
+  // Compacted since its last response: the cache holds the old conversation, nothing is worth watching.
+  if (lastRequest === 'compacted') return
+  const now = await $.clock.now()
+  if (lastRequest === null && typeof e.seconds_since_last_response === 'number' && e.seconds_since_last_response >= 0) lastRequest = now - e.seconds_since_last_response * 1000
+  if (lastRequest === null) return
+  await observe($, config, { kind: 'resumed', lastRequestAt: lastRequest, contextTokens: typeof e.context_tokens === 'number' ? e.context_tokens : undefined })
 }
 
 // Safe to call any number of times: a reload runs session.start again with the old timers already dropped.
@@ -281,7 +359,7 @@ const observeSettingsTtl = async ($: EngineInterface, config: Config) => {
     const ttlMs = await readSettingsTtl($)
     if (ttlMs !== null) await observe($, config, { kind: 'ttl', ttlMs, source: 'settings' })
   } catch (err) {
-    $.ui.log(`settings not read: ${String(err)}`)
+    noted($, `settings not read: ${String(err)}`)
   }
 }
 
@@ -402,7 +480,7 @@ const renew = async ($: EngineInterface, config: Config) => {
     if (usage === undefined || usage === null) await observe($, config, { kind: 'renew-failed' })
     else await observe($, config, { kind: 'renewed', isHit: isCacheHit(usage), sentAt })
   } catch (err) {
-    $.ui.log(`renewal failed: ${String(err)}`)
+    noted($, `renewal failed: ${String(err)}`)
     await observe($, config, { kind: 'renew-failed' })
   }
 }
@@ -420,9 +498,9 @@ const prepare = async ($: EngineInterface, config: Config) => {
     const result = await $.prompt.submit({ text: config.preparePrompt })
     // Another plugin's hook may drop the prompt: then nothing was announced and nothing is compacted.
     if (result.drop === undefined) return
-    $.ui.log(`announcement dropped: ${String(result.drop)}`)
+    noted($, `announcement dropped: ${String(result.drop)}`)
   } catch (err) {
-    $.ui.log(`announcement not sent: ${String(err)}`)
+    noted($, `announcement not sent: ${String(err)}`)
   }
   nextTurnBy = 'unknown'
   await observe($, config, { kind: 'refused', reason: NOT_ANNOUNCED })
@@ -435,7 +513,7 @@ const writeLog = async ($: EngineInterface, why: Cause, before: number | null, a
     await $.store.set(logKey(entry), entry)
     for (const key of outdated(await $.store.keys())) await $.store.delete(key)
   } catch (err) {
-    $.ui.log(`compaction not logged: ${String(err)}`)
+    noted($, `compaction not logged: ${String(err)}`)
   }
 }
 
@@ -465,8 +543,8 @@ const wake = async ($: EngineInterface, text: string, atTurns: number) => {
   try {
     // A digit left in the prompt box answered the question; it is no message being written.
     const draft = (await $.prompt.read()).text.trim()
-    if (draft !== '' && choiceOfDigit(CHOICES_OF.session, draft) === null) return $.ui.log(WAKE_TYPING)
-    if (turnsStarted !== atTurns) return $.ui.log(WAKE_OVERTAKEN)
+    if (draft !== '' && choiceOfDigit(CHOICES_OF.session, draft) === null) return noted($, WAKE_TYPING)
+    if (turnsStarted !== atTurns) return noted($, WAKE_OVERTAKEN)
     wakeSent = prompt
     wakeAtTurns = atTurns
     // The turn is somebody else's as the core sees it, whether or not the prompt passes this plugin's own hook.
@@ -475,11 +553,11 @@ const wake = async ($: EngineInterface, text: string, atTurns: number) => {
     if (result.drop === undefined) wakesInRow++
     else {
       nextTurnBy = 'unknown'
-      $.ui.log(`note after the compaction not sent: ${String(result.drop)}`)
+      noted($, `note after the compaction not sent: ${String(result.drop)}`)
     }
   } catch (err) {
     nextTurnBy = 'unknown'
-    $.ui.log(`note after the compaction not sent: ${String(err)}`)
+    noted($, `note after the compaction not sent: ${String(err)}`)
   }
   if (wakeSent === prompt) wakeSent = null
 }
@@ -514,7 +592,7 @@ const compact = async ($: EngineInterface, config: Config, anchorAt: number | nu
     await writeLog($, why, sizes.before, sizes.after, said)
     if (why.why === 'session' && then !== '' && !isYielding) void wake($, then, atTurns)
   } catch (err) {
-    $.ui.log(`compaction failed: ${String(err)}`)
+    noted($, `compaction failed: ${String(err)}`)
     await observe($, config, { kind: 'compact-failed' })
   }
 }
@@ -595,7 +673,7 @@ const yields = async ($: EngineInterface): Promise<boolean> => {
     dropQuestion($)
     $.ui.status(undefined)
     $.ui.invalidate('ui.render')
-    $.ui.log('standing down: the plugin built on this one runs in the session')
+    noted($, 'standing down: the plugin built on this one runs in the session')
   }
   isWatching = false
   ticker?.cancel()
@@ -609,7 +687,7 @@ const readLook = async ($: EngineInterface) => {
   try {
     theme = (await $.config.list()).find(row => row.key === 'theme')?.value
   } catch (err) {
-    $.ui.log(`theme not read: ${String(err)}`)
+    noted($, `theme not read: ${String(err)}`)
   }
   const next = lookOf(theme)
   if (next === look) return
@@ -623,7 +701,7 @@ const showIntro = async ($: EngineInterface, config: Config) => {
   try {
     if ((await $.store.get(INTRO_KEY)) === INTRO_SEEN) return
   } catch (err) {
-    $.ui.log(`store not read: ${String(err)}`)
+    noted($, `store not read: ${String(err)}`)
   }
   // The plugin built on this one may have turned up while the store was read: then it is its to tell.
   if (isYielding) return
@@ -655,7 +733,7 @@ const dismissIntro = async ($: EngineInterface) => {
   try {
     await $.store.set(INTRO_KEY, INTRO_SEEN)
   } catch (err) {
-    $.ui.log(`store not written: ${String(err)}`)
+    noted($, `store not written: ${String(err)}`)
   }
 }
 
@@ -681,11 +759,11 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
     await $.command.register({
       name: 'bell',
       description: 'Cache Bell: the state of the prompt cache',
-      argumentHint: 'status | log [count] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off',
+      argumentHint: 'status | report | log [count] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off',
       immediate: true,
     })
   } catch (err) {
-    $.ui.log(`/bell not registered: ${String(err)}`)
+    noted($, `/bell not registered: ${String(err)}`)
   }
   // The tool the compact skill calls. Claude Code lists it as mcp__cache-bell__compact.
   try {
@@ -705,7 +783,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
       },
     })
   } catch (err) {
-    $.ui.log(`compact tool not registered: ${String(err)}`)
+    noted($, `compact tool not registered: ${String(err)}`)
   }
   await observeSettingsTtl($, config)
   // An assisted test: CACHE_BELL_DEMO=30 shows the question for 30 s right after the start.
@@ -717,6 +795,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
 // A /clear starts the state over. The TTL the API was seen to grant stays; what the settings ask for is
 // read again, in case it changed.
 const cleared = async ($: EngineInterface, config: Config) => {
+  notices.length = 0
   await observe($, config, { kind: 'cleared' })
   await observeSettingsTtl($, config)
 }
@@ -729,13 +808,69 @@ const versionNow = async ($: EngineInterface): Promise<string | undefined> => {
   try {
     version = versionOf(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
   } catch (err) {
-    $.ui.log(`manifest not read: ${String(err)}`)
+    noted($, `manifest not read: ${String(err)}`)
   }
   return version
 }
 
 // What /bell takes, said whenever it is given something else.
-const USAGE = 'Usage: /bell status | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off'
+const USAGE = 'Usage: /bell status | report | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off'
+
+// What a report of a problem needs, gathered for the person to paste: see core/report.ts for what it holds.
+// The end of a large transcript is given half the hook's time: a report without it beats no report.
+const REPORT_READ_MS = 5000
+const reportNow = async ($: EngineInterface, config: Config): Promise<string> => {
+  await queue
+  const now = await $.clock.now()
+  const state = (await read($, machine)) ?? initialState(config)
+  transcriptPath ??= (await read($, transcript)) ?? undefined
+  const path = transcriptPath
+  let exists: boolean | null = null
+  let size: number | null = null
+  let tail: Digest | string | null = null
+  if (path !== undefined && path !== '') {
+    try {
+      exists = await $.fs.exists(path)
+      if (exists) {
+        size = (await $.fs.stat(path)).size
+        // Switched off, the transcript is not read for a report either.
+        tail = !config.readTranscript
+          ? 'readTranscript is off'
+          : digestOf(size <= FS_READ_LIMIT ? await $.fs.read(path) : await readEnd($, path, TAIL_MAX_BYTES, REPORT_READ_MS))
+      }
+    } catch (err) {
+      tail = errorCode(String(err))
+    }
+  }
+  let askedTtlMs: number | null = null
+  let contextTokens: number | undefined
+  try {
+    askedTtlMs = await readSettingsTtl($)
+    contextTokens = (await $.session.usage()).context.tokens
+  } catch {
+    // The report says what it has.
+  }
+  return problemReport(state, now, config, {
+    version: await versionNow($),
+    isWindows: (await $.env.get('OS')) === 'Windows_NT',
+    surface,
+    model: lastModel,
+    env: {
+      bedrock: await $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+      vertex: await $.env.get('CLAUDE_CODE_USE_VERTEX'),
+      foundry: await $.env.get('CLAUDE_CODE_USE_FOUNDRY'),
+      baseUrl: await $.env.get('ANTHROPIC_BASE_URL'),
+      noCaching: await $.env.get('DISABLE_PROMPT_CACHING'),
+      force5m: await $.env.get('FORCE_PROMPT_CACHING_5M'),
+      ttl: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+    },
+    askedTtlMs,
+    contextTokens,
+    transcript: { isKnown: path !== undefined && path !== '', exists, size, readAt, failed: unread, rereadAt },
+    tail,
+    notices,
+  })
+}
 
 const command = async ($: EngineInterface, config: Config, unknown: readonly string[], args: string) => {
   const words = args.trim().split(/\s+/)
@@ -776,13 +911,21 @@ const command = async ($: EngineInterface, config: Config, unknown: readonly str
       return { text: `The log could not be read: ${String(err)}` }
     }
   }
+  if (verb === 'report') return { text: await reportNow($, config) }
   if (verb !== '' && verb !== 'status') {
     return { text: USAGE }
   }
   await queue
   const state = (await read($, machine)) ?? initialState(config)
   const usage = await $.session.usage()
-  return { text: statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($), unknown }, extension) }
+  const report = statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($), unknown }, extension)
+  // While a turn runs (the person's, or the plugin's own announcement) Claude Code holds a command's answer
+  // back until the turn is over, when it no longer holds. A notice shows at once; it is one line.
+  if (state.phase === 'BUSY' || state.phase === 'PREPARING') {
+    $.ui.log(report.split('\n').join(' · '))
+    return {}
+  }
+  return { text: report }
 }
 
 // The plugin's hooks. `extend` is how a plugin built on this one adds to it: its own hooks module calls this
@@ -794,6 +937,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   texts = choiceTexts(extension)
 
   on('session.start', async ($, e, next) => {
+    surface = e.surface ?? undefined
     await start($, config, e.isInteractive)
     return next(e)
   })
@@ -967,6 +1111,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // a subagent's request has a prefix of its own.
   on('turn.step', async function* ($, e, next) {
     if (isWatching && e.agentId === undefined) {
+      lastModel = e.model
       await observe($, config, { kind: 'request', sentAt: await $.clock.now() })
     }
     return yield* next(e)
@@ -991,12 +1136,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // The other Stop hooks go first: reading a large transcript's tail starts a process.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    if (isWatching && e.transcript_path !== transcriptPath) {
-      transcriptPath = e.transcript_path
-      // Another file: what was read of the old one says nothing of it.
-      readSize = null
-      await update($, transcript, () => transcriptPath ?? null)
-    }
+    if (isWatching && typeof e.transcript_path === 'string') await nameTranscript($, e.transcript_path)
     if (isWatching) await readTranscriptTtl($, config, transcriptPath)
     return result
   })
@@ -1020,6 +1160,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('classic.SessionStart', async ($, e, next) => {
     if (isWatching && e.source === 'compact') await observe($, config, { kind: 'compacted' })
     if (isWatching && e.source === 'clear') await cleared($, config)
+    if (isWatching && (e.source === 'resume' || e.source === 'fork')) await resumed($, config, e)
     return next(e)
   })
 

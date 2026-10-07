@@ -43,6 +43,9 @@ export type Observation =
   // own: the plugin ran it itself, with the sizes before and after in tokens
   | { kind: 'compacted'; own?: { before: number | null; after: number | null } }
   | { kind: 'cleared' }
+  // the session was resumed from its transcript in a new process: when its last request went out, as the
+  // transcript or Claude Code says, and the size of the context then
+  | { kind: 'resumed'; lastRequestAt: number; contextTokens?: number | undefined }
 
 export type Action =
   | { kind: 'redraw' }

@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.8](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 254 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.11](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 281 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -57,7 +57,7 @@ compact on its own.
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.8, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.11, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -76,7 +76,8 @@ changes between releases). Tested on Windows (terminal); macOS and Linux are not
 
 | Command | What it does |
 | :- | :- |
-| `/bell` or `/bell status` | The plugin's version and what it sees: the state, the TTL and where it comes from, the time of the last request, what comes next and when. |
+| `/bell` or `/bell status` | The plugin's version and what it sees: the state, the TTL and where it comes from, the time of the last request, what comes next and when. While Claude is working it is shown at once, as a notice of one line. |
+| `/bell report` | What a report of a problem needs, to paste into an issue: the versions, the model, whether another provider or an API address of your own is set, the options, the state, the size of the transcript and the usage figures of its last response, and the plugin's last notices, of each only the plugin's own words. No message text, no file path, no address, no key. Typed while Claude is working, it is printed when the turn is over. |
 | `/bell log [count]` | The last compactions, ten when no count is given, 200 at most. |
 | `/bell demo [seconds] [bg] [stay]` | Shows the question for that many seconds (1 to 600, 30 when none is given) and sends nothing. `bg` swings the background instead of the text; `stay` keeps the question up when you send a message. |
 | `/bell show calm\|act\|cold\|intro` | Holds the band in one of its looks, or puts the first-run notice up, for a screenshot. `/bell show off` puts the real band back. |
@@ -223,12 +224,24 @@ After a compaction the plugin sleeps until you work in the session again.
 The TTL is taken from the `ttl` option if it is set; otherwise from the newer of the transcript (what
 the API really granted) and the last model switch; before either is known, from the Claude Code settings
 (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `promptCacheTtl`). When nothing is known,
-5 minutes is assumed.
+5 minutes is assumed, and the band says so beside the countdown:
+`lifetime 5m assumed, not yet seen in the data`.
 
 The transcript is read when a turn ends, and once its TTL is confirmed no more than every two minutes;
 a transcript that did not grow is not read at all. If it cannot be read and nothing else names the TTL,
 the five minutes are only a guess: the band says so, the plugin tries again (after 15 seconds, after a
 minute, then every five minutes), and until a read goes through it does not ask, renew or compact.
+
+A session you resume (`claude --resume`, `--continue`, a fork) starts in a new process that has sent no
+request yet. The plugin then reads the TTL and the time of the last request from the transcript right
+away, so the band and `/bell status` show from the start how long the cache still lives, or that it ran
+out while the session was closed. From there the session is watched like any other: with time left, the
+plugin asks, renews and compacts as the mode says. Where the transcript is not read or cannot be, the
+time comes from Claude Code, which says how long ago the last response came. The TTL then comes as
+described above: from the `ttl` option or the Claude Code settings; with neither, five minutes are assumed
+when `readTranscript` is off or the session keeps no transcript, and when the read failed the plugin
+waits for it and does not ask, renew or compact. A session that was compacted after its last response is
+left alone until you work in it, as after any compaction.
 
 ## The log of compactions
 
@@ -265,7 +278,9 @@ the Claude Code configuration directory), the last 200 entries, for all sessions
 
 Cache Bell makes no network connections of its own: its requests go to the model through Claude Code, like
 your own messages, and nothing else leaves the machine. Those requests are the renewals, the announcement
-before a compaction, the compaction itself, and the note sent back after it.
+before a compaction, the compaction itself, and the note sent back after it. What a `/bell` command prints
+is no request of the plugin's: like the output of any command, Claude Code keeps it in the session's
+transcript and hands it to Claude with your next message.
 
 What it reads:
 
@@ -273,10 +288,30 @@ What it reads:
   object; nothing else of it is used, kept or logged;
 - the environment variables `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `OS` and
   `CACHE_BELL_DEMO`;
-- the session's transcript file, for the cache TTL the API granted: only the usage figures of its last lines,
-  nothing of what was said, and nothing of it is kept. `readTranscript` = off stops it. Of a transcript above 4 MiB
-  only the end is read: what was appended since the last read, no less than 64 KiB and 1 MiB at the most.
-  For that the plugin starts `tail` (PowerShell on Windows);
+- only when you run `/bell report`, five more environment variables: `CLAUDE_CODE_USE_BEDROCK`,
+  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` and `DISABLE_PROMPT_CACHING`, for whether each is
+  switched on, and `ANTHROPIC_BASE_URL`, for whether it is set at all. Of these five the report says yes
+  or no; the address itself is not shown, kept or logged. Of the variables named above it says whether
+  `FORCE_PROMPT_CACHING_5M` is on, and shows the value of `CLAUDE_CODE_PROMPT_CACHE_TTL` when it is a word
+  of at most eight letters and digits. The report also reads the transcript (a file up to 4 MiB
+  whole, of a larger one the last 1 MiB) for the number of responses, the usage figures of the last one,
+  and the model and the Claude Code version its row names; with `readTranscript` = off it only asks whether
+  the file exists and how large it is. Beside these the report holds the plugin's version, the
+  system (Windows or not), the surface the session started on as Claude Code names it, the model's name
+  of the last request (a name that begins with `arn:`, holds twelve digits in a row, is longer than 80
+  characters or holds anything but letters, digits and `. _ @ : [ ] -` is not shown), the size of the
+  context, the options (of the three texts you can change only which ones are changed, not the texts),
+  the state, and the last notices the plugin wrote to Claude Code's log: of each only the
+  plugin's own words and an error's code or name, never the error's text. The plugin sends it nowhere.
+  Like the output of any command, Claude Code keeps it in the session's transcript and hands it to Claude
+  with your next message;
+- the session's transcript file, for the cache TTL the API granted: only the usage figures of its last
+  lines, nothing of what was said, and nothing of it is kept. When a session is resumed, also the time of
+  the last message a response followed, for when the last request went out. For that it also looks
+  whether a message begins with `<`, the mark of a command's output; nothing else of the message is read
+  into account or kept. `readTranscript` = off stops it. Of a transcript above 4 MiB only the end is read:
+  what was appended since the last read, no less than 64 KiB and 1 MiB at the most. For that the plugin
+  starts `tail` (PowerShell on Windows);
 - Claude Code's configuration rows (the `/config` menu). The mods API hands a plugin all of them as one list;
   it uses the theme, to pick colours for a light or a dark background. The other rows are not used, kept
   or logged;
@@ -289,10 +324,15 @@ What it reads:
   the plugin's own prompts, and is not kept or logged. A message that is exactly a digit of the open
   question is your answer: the plugin takes it and does not let it reach Claude;
 - when each request to the model is sent, when a turn starts and ends and how it ended, and each compaction
-  with its sizes before and after: the times, the counts and the reasons, nothing of what was said;
+  with its sizes before and after: the times, the counts and the reasons, nothing of what was said. From
+  0.2.10 also the model's name of the last request, held in memory for `/bell report` and not written
+  anywhere;
 - the size of the context in tokens, as Claude Code counts it;
 - the session id, for its first eight characters in the log of compactions;
-- the path of the session's transcript file, which Claude Code hands over at the end of a turn;
+- the path of the session's transcript file, which Claude Code hands over at the end of a turn and when
+  a session is resumed. With a resumed session Claude Code also says how long ago its last response came
+  and how large its context was; the plugin uses both and keeps them as it keeps the times and sizes
+  above;
 - the cache TTL Claude Code reports when you switch the model;
 - its own manifest (`plugin.json`), for the version `/bell status` shows;
 - one value another plugin may keep in the session's state: whether the plugin built on this one
@@ -321,8 +361,8 @@ Elsewhere:
   not be read, a renewal or a compaction failed, a prompt of the plugin's was not sent. A line holds the
   error as Claude Code gave it, which may name a file's path, and nothing of the conversation.
 
-What it only holds in memory: the note Claude may leave with a compaction request. The plugin keeps it
-until the compaction is done or called off, sends it back as a prompt after a compaction that went
+What it only holds in memory: the note Claude may leave with a compaction request, and the plugin's last
+eight notices, cut as described under `/bell report`. The plugin keeps the note until the compaction is done or called off, sends it back as a prompt after a compaction that went
 through, unless one of the cases named above holds, and does not write it anywhere itself. Claude Code
 records the request and the prompt in the session's transcript on this machine, as it does every tool
 call and prompt.
@@ -346,8 +386,9 @@ It answers no other command and no other tool, and takes no permission decision.
 that are also calls: `prompt.submit`, for the messages that are sent, and `session.append`, for the two
 notices in the transcript, both as said above; `config.set`, for the theme only, passed on unchanged;
 `session.compact`, passed on unchanged, to log the compaction. It listens to three of Claude Code's hook
-events and passes each on unchanged: `Stop`, for the path of the transcript; `SessionStart`, to learn that
-a compaction or a `/clear` happened; `PostModelSwitch`, for the cache TTL of the new model.
+events and passes each on unchanged: `Stop`, for the path of the transcript; `SessionStart`, to learn
+that a compaction or a `/clear` happened or that the session was resumed; `PostModelSwitch`, for the
+cache TTL of the new model.
 
 It writes nothing to `settings.json` and never asks for credentials. To delete what it kept, delete its
 file in the store. It is kept until you do, except that the log drops entries beyond the newest 200.
@@ -366,10 +407,13 @@ file in the store. It is kept until you do, except that the log drops entries be
 - **The band says the lifetime is not known yet.** The transcript could not be read; on Windows a very
   busy machine can make PowerShell too slow to answer. The plugin tries again on its own and until then
   does not ask, renew or compact. To stop depending on the read, set `ttl` to `5m` or `1h`.
-- **An option does not seem to apply.** `/bell status` prints the mode in use. If an option is set to a word
-  it does not take, the status names the option and the words it takes, and the default is used instead.
+- **An option does not seem to apply.** `/bell status` prints the mode in use. If an option in
+  `settings.json` is set to a value it does not accept, the default is used instead.
 - **The plugin refuses to load after a Claude Code update.** The mods API is early access and changes
   between releases; see the requirements under [Quick start](#quick-start).
+- **Something else is wrong.** Run `/bell report` and paste what it prints into an
+  [issue](https://github.com/hollerbell/cache-bell/issues). Read it first: it is made to hold nothing
+  private, and you are the one who posts it.
 
 Questions and bugs: [open an issue](https://github.com/hollerbell/cache-bell/issues). Security problems: please don't post them
 in public, see [SECURITY.md](SECURITY.md).
@@ -441,7 +485,7 @@ Layout of the plugin:
 | :- | :- |
 | `.claude-plugin/plugin.json` | manifest and options (`userConfig`) |
 | `hooks/register.tsx` | the only file that touches the mods API (`$`): observes, calls the core, draws |
-| `core/` | pure logic without `$`: `timing`, `transcript`, `decide` (the state machine), `ask`, `guards`, `config`, `view`, `log` |
+| `core/` | pure logic without `$`: `timing`, `transcript`, `decide` (the state machine), `ask`, `guards`, `config`, `view`, `report`, `log` |
 | `core/extension.ts` | extension point: lets other code add its own reasons to ask for a compaction |
 | `skills/compact/` | the skill that tells Claude when and how to ask for a compaction |
 | `types/index.d.ts` | the contract of the values kept in `$.state` |

@@ -2,10 +2,40 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.11
+
+- A session you resume (`claude --resume`, `--continue`, a fork) knows its cache from the start. Until now
+  the plugin showed "unknown" and assumed five minutes until the first turn in the new process had ended.
+  It now reads the TTL and the time of the last request from the transcript as the session starts: the
+  band and `/bell status` say how long the cache still lives, or that it ran out while the session was
+  closed, and with time left the plugin asks, renews and compacts as the mode says.
+- When nothing has named the cache's lifetime and the countdown runs on the assumed five minutes, the band
+  says so beside it (`lifetime 5m assumed, not yet seen in the data`). Until now only `/bell status`
+  did.
+
+## 0.2.10
+
+- `/bell status` typed while Claude is working is shown at once, as a notice of one line. Until now Claude
+  Code printed it only when the turn was over, with what was true when you typed it.
+- New: `/bell report` prints what a report of a problem needs, to paste into an issue: the versions, the
+  model, whether another provider or an API address of your own is set (yes or no, never the address),
+  the options, the state, the size of the transcript and the usage figures of its last response, and
+  the plugin's last notices, of each only the plugin's own words. It holds no message text, no file
+  path, no address and no key, and the plugin sends it nowhere. For it the plugin reads five more
+  environment variables, named in the README's Privacy section.
+- The bug report template asks for the output of `/bell report` instead of `/bell status`.
+
+## 0.2.9
+
+- The options that take one of a few words (`mode`, `ask`, `renewMethod`, `ttl`, `sessionCompact`,
+  `display`) are a list to pick from in `/config` again, as they were before 0.2.7. A word in
+  `settings.json` that an option does not accept is still replaced by the default. Claude Code now checks
+  this itself, so `/bell status` no longer names the word.
+
 ## 0.2.8
 
-- The first-run notice shown in several sessions at once is put away in all of them by OK, or by a message,
-  in one: the others follow within a few seconds.
+- When the first-run notice is up in several sessions at once, OK or a message in one of them puts it away
+  in all: the others follow within a few seconds.
 - The plugin's entry in Anthropic's directory gets keywords and a home page: two more fields in the manifest.
 
 ## 0.2.7
@@ -16,8 +46,8 @@ What changed in each version, newest first. `/bell status` says which version ru
 - The README's Privacy section now names everything the plugin reads, writes and changes.
 - The options that take one of a few words (`mode`, `ask`, `renewMethod`, `ttl`, `sessionCompact`,
   `display`) are rows of free text in `/config`, no longer a list to pick from: Anthropic's plugin directory
-  does not take such a list. A word an option does not take is replaced by the default, as before, and `/bell status`
-  now says so and names the words the option takes.
+  does not take such a list. A word an option does not take is replaced by the default,
+  as before, and `/bell status` now says so and names the words the option takes.
 - `/bell reset` is gone: the plugin no longer writes any setting. To go back to the defaults, change the
   rows in `/config`, or delete the plugin's key under `pluginConfigs` in `settings.json`.
 - The `compact` tool's parameter for the note is called `resumeWith` (it was `then`, which is still read).

@@ -1,6 +1,7 @@
-// plugin.json's userConfig → the configuration the core works with. Claude Code checks only the type of a
-// value; which words an option takes, and the bounds of a number, are kept here. A value that makes no sense
-// falls back to its default instead of failing the load, and /bell status says so.
+// plugin.json's userConfig → the configuration the core works with. Claude Code checks the type of a value
+// and, where the manifest lists the words an option takes, the word; the same words and the bounds of a
+// number are kept here too. A value that still makes no sense falls back to its default instead of failing
+// the load.
 
 import { MINUTE_MS, parseTtl } from './timing'
 import type { Config, Mode } from './types'
@@ -58,7 +59,8 @@ export const PRESETS: Record<Exclude<Mode, 'custom'>, Behaviour> = {
   'compact-only': { ask: 'never', maxRenewals: 0, maxRenewalsAsked: null, renewMethod: 'none', prepareBeforeCompact: false, compact: true },
 }
 
-// The options that take one of a few words, with those words. /config shows each as a row of free text.
+// The options that take one of a few words, with those words. The manifest lists the same words, so /config
+// offers them to pick from and Claude Code hands over the default in place of any other word.
 export const WORDS = {
   mode: ['notify', 'keep', 'prepare-compact', 'compact-only', 'custom'],
   ask: ['first', 'every', 'never'],
@@ -75,6 +77,7 @@ const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback
 const CUSTOM_ONLY: readonly string[] = ['ask', 'renewMethod']
 
 // What /bell status says of each such option that is set to something else: the default is used instead.
+// Only a Claude Code that does not check the manifest's lists lets such a word through to here.
 // An option that is not set at all is not a mistake, and neither is one the mode in use does not read.
 export const unknownWords = (options: Options): string[] =>
   Object.entries(WORDS)

@@ -474,6 +474,16 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       return { state: { ...compacted, lastCompaction, phase: 'DORMANT', resumeTo: null }, actions: [...close, ...redraw] }
     }
 
+    case 'resumed': {
+      // Only where nothing is known yet: a process that has seen a request of its own knows better.
+      if (state.phase !== 'UNKNOWN' || state.anchorAt !== null) return { state, actions: [] }
+      const anchorAt = Math.min(observation.lastRequestAt, now)
+      const resumed: State = { ...state, anchorAt, priorAnchorAt: null, workedAt: anchorAt, contextTokens: observation.contextTokens ?? state.contextTokens }
+      // A cache that ran out while the session was closed is cold without a word: nobody was waiting.
+      if (isPastMax(resumed, now)) return { state: { ...resumed, phase: 'COLD', coldReason: 'expired' }, actions: redraw }
+      return { state: { ...resumed, phase: 'WARM', coldReason: null }, actions: redraw }
+    }
+
     case 'cleared':
       return {
         state: { ...state, ...FRESH, ...UNASKED, ...UNHELD, lastCompaction: null, phase: 'UNKNOWN', anchorAt: null, coldReason: null, resumeTo: null, contextTokens: null, ext: extension.reset(state.ext, 'cleared'), isRequested: false, requestMs: null },

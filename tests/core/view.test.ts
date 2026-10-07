@@ -38,10 +38,10 @@ test('a TTL is named as Claude Code names it', () => {
 
 test('the band shows the countdown while warm and the reason while cold', () => {
   const table: [string, State, number, object | null][] = [
-    ['right after the request', warm(), T0, { text: 'h⣿ Cache Bell: prompt cache expires in 4:35', tone: 'calm' }],
-    ['one millisecond before the question is due', warm(), T0 + 210 * S - 1, { text: 'h⣿ Cache Bell: prompt cache expires in 1:05', tone: 'calm' }],
-    ['once the question is due', warm(), T0 + 210 * S, { text: 'h⣿ Cache Bell: prompt cache expires in 1:05', tone: 'warn' }],
-    ['an hour-long cache', warm({ ttlMs: TTL_1H }), T0 + 60 * S, { text: 'h⣿ Cache Bell: prompt cache expires in 54 min', tone: 'calm' }],
+    ['right after the request', warm(), T0, { text: 'h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data', tone: 'calm' }],
+    ['one millisecond before the question is due', warm(), T0 + 210 * S - 1, { text: 'h⣿ Cache Bell: prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', tone: 'calm' }],
+    ['once the question is due', warm(), T0 + 210 * S, { text: 'h⣿ Cache Bell: prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', tone: 'warn' }],
+    ['an hour-long cache', warm({ ttlMs: TTL_1H }), T0 + 60 * S, { text: 'h⣿ Cache Bell: prompt cache expires in 54 min · lifetime 1h assumed, not yet seen in the data', tone: 'calm' }],
     ['cold, expired', warm({ phase: 'COLD', coldReason: 'expired' }), T0, { text: 'h⣿ Cache Bell: prompt cache expired · the next message re-sends the whole context', tone: 'cold' }],
     ['cold, slept', warm({ phase: 'COLD', coldReason: 'sleep' }), T0, { text: 'h⣿ Cache Bell: prompt cache expired while the machine slept · the next message re-sends the whole context', tone: 'cold' }],
     ['cold, model changed', warm({ phase: 'COLD', coldReason: 'model-switch' }), T0, { text: 'h⣿ Cache Bell: prompt cache lost, the model changed · the next message re-sends the whole context', tone: 'cold' }],
@@ -165,14 +165,14 @@ test('the countdown of a warm cache shows only once the time left is down to the
   const table: [string, number, string | null, string | undefined][] = [
     ['at the start', T0, null, undefined],
     ['a second before the limit', T0 + 120 * S - 1, null, undefined],
-    ['at the limit', T0 + 120 * S, 'h⣿ Cache Bell: prompt cache expires in 53 min', 'cache 53 min'],
-    ['later', T0 + 600 * S, 'h⣿ Cache Bell: prompt cache expires in 45 min', 'cache 45 min'],
+    ['at the limit', T0 + 120 * S, 'h⣿ Cache Bell: prompt cache expires in 53 min · lifetime 1h assumed, not yet seen in the data', 'cache 53 min'],
+    ['later', T0 + 600 * S, 'h⣿ Cache Bell: prompt cache expires in 45 min · lifetime 1h assumed, not yet seen in the data', 'cache 45 min'],
   ]
   for (const [name, now, text, entry] of table) {
     expect({ name, text: band(hour, now, late)?.text ?? null, entry: statusEntry(hour, now, late) }).toEqual({ name, text, entry })
   }
   // A five-minute cache never has that much left: always shown. So are a cold cache and the plugin at work.
-  expect(band(warm(), T0, late)?.text).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
+  expect(band(warm(), T0, late)?.text).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
   expect(band(warm({ phase: 'COLD', coldReason: 'expired', ttlMs: TTL_1H }), T0, late)?.text).toMatch(/prompt cache expired/)
   expect(band(warm({ phase: 'COMPACTING', ttlMs: TTL_1H }), T0, late)?.text).toBe('h⣿ Cache Bell: compacting…')
 })
@@ -304,4 +304,10 @@ test('a TTL that is only a guess is said in the band and in the report, with wha
   const known = statusReport(warm({ contextTokens: 150000, isTtlUnread: true, ttlMs: TTL_1H, ttlSource: 'transcript' }), T0 + 10 * S, acting, { contextTokens: 150000 })
   expect(known).toContain('Cache TTL: 1h (read from the transcript)')
   expect(known).toMatch(/Next: asks in/)
+})
+
+test('the status report ends with what it is told of options set to a word they do not take', () => {
+  const said = 'ttl is set to "10m", which is not one of auto, 5m, 1h; the default, auto, is used'
+  expect(statusReport(warm(), T0, config, { contextTokens: 1, unknown: [said] }).split('\n').at(-1)).toBe(said)
+  expect(statusReport(warm(), T0, config, { contextTokens: 1, unknown: [] })).not.toContain('is set to')
 })

@@ -106,6 +106,9 @@ const isShown = (state: State, now: number, config: Config): boolean =>
 // The band while the TTL is only a guess: what is not known, and what follows from it.
 export const UNREAD = 'prompt cache: lifetime not known yet, the transcript could not be read · nothing is renewed or compacted until it is'
 
+// What the band adds to a countdown that runs on the default lifetime, after the word and the lifetime.
+export const ASSUMED = 'assumed, not yet seen in the data'
+
 const line = (state: State, now: number, config: Config): Band | null => {
   if (state.phase === 'WARM' && state.anchorAt !== null) {
     // Worth a line at any time: the plugin is not doing what it is there for.
@@ -115,7 +118,9 @@ const line = (state: State, now: number, config: Config): Band | null => {
     // about it: a countdown alone is worth having.
     const isLate = now >= deadlines(state.anchorAt, lifeOf(state), config.askLeadMs).tAsk
     const after = state.held !== null ? ` · compaction waits for ${WAITS_FOR[state.held.by]}` : state.isDeclined ? ' · nothing will be done' : ''
-    return { text: `prompt cache expires in ${formatLeft(leftMs(state, now))}${after}`, tone: isLate ? 'warn' : 'calm' }
+    // Nothing named the lifetime, the countdown runs on the default: said with it, or it reads as a fact.
+    const assumed = state.ttlSource === 'default' ? ` · lifetime ${formatTtl(state.ttlMs)} ${ASSUMED}` : ''
+    return { text: `prompt cache expires in ${formatLeft(leftMs(state, now))}${assumed}${after}`, tone: isLate ? 'warn' : 'calm' }
   }
   if (state.phase === 'RENEWING' || state.phase === 'PREPARING' || state.phase === 'COMPACTING') {
     return { text: `${WORKING[state.phase]}…`, tone: 'warn' }

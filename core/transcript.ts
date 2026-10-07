@@ -45,6 +45,51 @@ export const ttlFromTranscript = (text: string): number | null => {
   return null
 }
 
+// A response the API really gave: its usage counts tokens. The row Claude Code writes for a request that
+// failed (an API error, a refusal of the limit) looks like a response and is none.
+const isAnswer = (row: Json): boolean => {
+  const message = row.message
+  if (row.type !== 'assistant' || row.isApiErrorMessage === true || !isObject(message) || message.model === '<synthetic>' || !isObject(message.usage)) return false
+  const usage = message.usage
+  return tokens(usage.input_tokens) + tokens(usage.output_tokens) + tokens(usage.cache_read_input_tokens) + tokens(usage.cache_creation_input_tokens) > 0
+}
+
+// A row of the person's side that started no request: a command and its output, a row Claude Code adds
+// for itself.
+const isAside = (row: Json): boolean => {
+  if (row.isMeta === true) return true
+  const content = isObject(row.message) ? row.message.content : undefined
+  return typeof content === 'string' && content.trimStart().startsWith('<')
+}
+
+// When the last request of the main thread went out, from the transcript's tail: the time of the row the
+// last response answers (the person's message or a tool's result), which is written right before the
+// request is sent. Early rather than late: the cache's time is then not overstated. 'compacted' when the
+// conversation was compacted after that response: the cache holds the old conversation, as after any
+// compaction. null when the text holds no response of the main thread, or no dated row before it.
+export const lastRequestOf = (text: string): number | 'compacted' | null => {
+  const lines = text.split('\n')
+  let isAnswered = false
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    let row: unknown
+    try {
+      row = JSON.parse(lines[i] ?? '')
+    } catch {
+      continue
+    }
+    if (!isObject(row) || row.isSidechain === true) continue
+    if (row.isCompactSummary === true || (row.type === 'system' && row.subtype === 'compact_boundary')) return isAnswered ? null : 'compacted'
+    if (isAnswer(row)) {
+      isAnswered = true
+      continue
+    }
+    if (!isAnswered || row.type !== 'user' || isAside(row) || typeof row.timestamp !== 'string') continue
+    const at = Date.parse(row.timestamp)
+    return Number.isNaN(at) ? null : at
+  }
+  return null
+}
+
 // What PowerShell takes for a single quote: the apostrophe and its four typographic forms. Inside a quoted
 // string each is doubled, or a folder named with one would end the string.
 const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g
