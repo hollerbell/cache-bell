@@ -63,6 +63,9 @@ let isReading = false
 // Counts the transcripts this process was given: a read that began on one of them and ends after the next
 // was named says nothing of the new one.
 let transcriptNo = 0
+// What reached this instance of the plugin, for /bell report: where a session's transcript is never named,
+// the counts say which event did not come or came without the path.
+const seen = { starts: 0, startsWithPath: 0, stops: 0, stopsWithPath: 0, requests: 0 }
 let drawn = ''
 // Whether what a reload left behind in the state has been dealt with: once, at the first observation.
 let isRecovered = false
@@ -819,6 +822,8 @@ const USAGE = 'Usage: /bell status | report | log [count] | demo [seconds] [bg] 
 // What a report of a problem needs, gathered for the person to paste: see core/report.ts for what it holds.
 // The end of a large transcript is given half the hook's time: a report without it beats no report.
 const REPORT_READ_MS = 5000
+// How long after a Stop the read of the transcript is left to the hook itself: past the time a hook is given.
+const STOP_OWED_MS = 15000
 const reportNow = async ($: EngineInterface, config: Config): Promise<string> => {
   await queue
   const now = await $.clock.now()
@@ -867,6 +872,7 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
     askedTtlMs,
     contextTokens,
     transcript: { isKnown: path !== undefined && path !== '', exists, size, readAt, failed: unread, rereadAt },
+    events: { ...seen },
     tail,
     notices,
   })
@@ -1110,6 +1116,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // One request to the model. The moment it is sent is the cache's anchor; only the main thread counts,
   // a subagent's request has a prefix of its own.
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) seen.requests += 1
     if (isWatching && e.agentId === undefined) {
       lastModel = e.model
       await observe($, config, { kind: 'request', sentAt: await $.clock.now() })
@@ -1133,10 +1140,26 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     return result
   })
 
-  // The other Stop hooks go first: reading a large transcript's tail starts a process.
+  // The other Stop hooks go first: reading a large transcript's tail starts a process. The path is noted
+  // before them and the read is owed from then on: where they take the hook's whole time, or fail, a tick
+  // reads instead.
   on('classic.Stop', async ($, e, next) => {
+    const path = typeof e.transcript_path === 'string' ? e.transcript_path : ''
+    seen.stops += 1
+    if (path !== '') seen.stopsWithPath += 1
+    if (isWatching && path !== '') {
+      // What fails here must not keep the other Stop hooks from running.
+      try {
+        await nameTranscript($, path)
+        if (config.readTranscript && config.ttlMs === null) {
+          const owedAt = (await $.clock.now()) + STOP_OWED_MS
+          rereadAt = rereadAt === null ? owedAt : Math.min(rereadAt, owedAt)
+        }
+      } catch (err) {
+        noted($, `transcript not named: ${String(err)}`)
+      }
+    }
     const result = await next(e)
-    if (isWatching && typeof e.transcript_path === 'string') await nameTranscript($, e.transcript_path)
     if (isWatching) await readTranscriptTtl($, config, transcriptPath)
     return result
   })
@@ -1158,6 +1181,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
   // A compaction this hook did not see (one a plugin ran) still ends with a SessionStart of source compact.
   on('classic.SessionStart', async ($, e, next) => {
+    seen.starts += 1
+    if (typeof e.transcript_path === 'string' && e.transcript_path !== '') seen.startsWithPath += 1
     if (isWatching && e.source === 'compact') await observe($, config, { kind: 'compacted' })
     if (isWatching && e.source === 'clear') await cleared($, config)
     if (isWatching && (e.source === 'resume' || e.source === 'fork')) await resumed($, config, e)

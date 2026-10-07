@@ -2,6 +2,17 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.2.12
+
+- The plugin notes the path of the session's transcript as soon as a turn ends, before the Stop hooks of
+  other plugins run, and when the transcript is not read there, a later tick of the plugin reads it.
+  Until now the path was noted after those hooks had returned.
+- `/bell report` has a new row, `Events seen`: how many session starts, ends of turns and requests reached
+  the plugin since it was loaded, and how many of the first two named the transcript. Where a transcript
+  stays unnamed, the row shows which event did not come or came without the path. Counts only, nothing of
+  what was said.
+- README: how to update is now in Quick start as well.
+
 ## 0.2.11
 
 - A session you resume (`claude --resume`, `--continue`, a fork) knows its cache from the start. Until now

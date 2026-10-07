@@ -77,6 +77,7 @@ const facts = (over: Partial<ReportFacts> = {}): ReportFacts => ({
   contextTokens: 73678,
   transcript: { isKnown: true, exists: true, size: 2512331, readAt: T0 - 38000, failed: 0, rereadAt: null },
   tail: digestOf(row(USAGE)),
+  events: { starts: 1, startsWithPath: 1, stops: 4, stopsWithPath: 3, requests: 9 },
   notices: [],
   ...over,
 })
@@ -93,6 +94,7 @@ test('the report says what an issue needs, row by row', () => {
     'State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 73 678 tokens · renewals 0',
     'Transcript: path known yes · exists yes · size 2 512 331 bytes · read for the TTL 0:38 ago · failed reads 0 · next try none',
     'End of the transcript: responses of the main thread 1 · usage of the last: input_tokens=2 cache_creation_input_tokens=5287 cache_read_input_tokens=91285 cache_creation{ephemeral_5m_input_tokens=0 ephemeral_1h_input_tokens=5287} output_tokens=120 service_tier server_tool_use{web_search_requests=0 nested}',
+    "Events seen: SessionStart 1, with the transcript's path 1 · Stop 4, with the path 3 · requests of the main thread 9",
     "The plugin's last notices: none",
   ])
 })
@@ -124,6 +126,7 @@ test('what the person wrote or set is never in the report: an address, a prompt,
     'State: UNKNOWN · TTL 5m from config · TTL unread no · last request never · context unknown · renewals 0',
     'Transcript: path known yes · exists not asked · size unknown · read for the TTL never · failed reads 2 · next try in 1:00',
     'End of the transcript: not read: EACCES',
+    "Events seen: SessionStart 1, with the transcript's path 1 · Stop 4, with the path 3 · requests of the main thread 9",
     "The plugin's last notices: ",
     '  transcript not read, it is tried again (EBUSY)',
   ])

@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.2.11](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 281 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.2.12](docs/badge-version.svg) ![tested with Claude Code 2.1.288](docs/badge-claude-code.svg) ![tests: 282 passing](docs/badge-tests.svg)
 
 **Saves your tokens and limits.** Stops a long Claude Code session from spending them on re-sending its
 whole context after a break.
@@ -54,10 +54,20 @@ Then open a new session, or run `/reload-plugins` in one that is open:
 In a conversation below 100 000 tokens the plugin only shows the countdown: it does not ask, renew or
 compact on its own.
 
+To update later, since Claude Code does not update this plugin on its own:
+
+```
+claude plugin marketplace update cache-bell
+claude plugin update cache-bell@cache-bell
+```
+
+Then run `/reload-plugins` in every session that is open. Installed from a clone, or to have it updated
+automatically: see [Update](#update).
+
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.2.11, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
+0.2.12, experimental. Needs Claude Code 2.1.288 or newer (the mods API, which is early access and
 changes between releases). Tested on Windows (terminal); macOS and Linux are not tested yet.
 
 **Feedback is welcome.** Tell us what works, what breaks and what is missing: [open an issue](https://github.com/hollerbell/cache-bell/issues).
@@ -77,7 +87,7 @@ changes between releases). Tested on Windows (terminal); macOS and Linux are not
 | Command | What it does |
 | :- | :- |
 | `/bell` or `/bell status` | The plugin's version and what it sees: the state, the TTL and where it comes from, the time of the last request, what comes next and when. While Claude is working it is shown at once, as a notice of one line. |
-| `/bell report` | What a report of a problem needs, to paste into an issue: the versions, the model, whether another provider or an API address of your own is set, the options, the state, the size of the transcript and the usage figures of its last response, and the plugin's last notices, of each only the plugin's own words. No message text, no file path, no address, no key. Typed while Claude is working, it is printed when the turn is over. |
+| `/bell report` | What a report of a problem needs, to paste into an issue: the versions, the model, whether another provider or an API address of your own is set, the options, the state, the counts of the events the plugin has seen, the size of the transcript and the usage figures of its last response, and the plugin's last notices, of each only the plugin's own words. No message text, no file path, no address, no key. Typed while Claude is working, it is printed when the turn is over. |
 | `/bell log [count]` | The last compactions, ten when no count is given, 200 at most. |
 | `/bell demo [seconds] [bg] [stay]` | Shows the question for that many seconds (1 to 600, 30 when none is given) and sends nothing. `bg` swings the background instead of the text; `stay` keeps the question up when you send a message. |
 | `/bell show calm\|act\|cold\|intro` | Holds the band in one of its looks, or puts the first-run notice up, for a screenshot. `/bell show off` puts the real band back. |
@@ -301,7 +311,9 @@ What it reads:
   of the last request (a name that begins with `arn:`, holds twelve digits in a row, is longer than 80
   characters or holds anything but letters, digits and `. _ @ : [ ] -` is not shown), the size of the
   context, the options (of the three texts you can change only which ones are changed, not the texts),
-  the state, and the last notices the plugin wrote to Claude Code's log: of each only the
+  the state, how many times Claude Code reported the session's start and the end of a turn to the plugin,
+  how many of those came with the transcript's path, and the number of requests of the main thread it
+  counted, and the last notices the plugin wrote to Claude Code's log: of each only the
   plugin's own words and an error's code or name, never the error's text. The plugin sends it nowhere.
   Like the output of any command, Claude Code keeps it in the session's transcript and hands it to Claude
   with your next message;
@@ -362,7 +374,8 @@ Elsewhere:
   error as Claude Code gave it, which may name a file's path, and nothing of the conversation.
 
 What it only holds in memory: the note Claude may leave with a compaction request, and the plugin's last
-eight notices, cut as described under `/bell report`. The plugin keeps the note until the compaction is done or called off, sends it back as a prompt after a compaction that went
+eight notices, cut as described under `/bell report`, and the counts of events that `/bell report` shows:
+numbers only, counted since the plugin was loaded (a reload starts them at zero) and not written anywhere. The plugin keeps the note until the compaction is done or called off, sends it back as a prompt after a compaction that went
 through, unless one of the cases named above holds, and does not write it anywhere itself. Claude Code
 records the request and the prompt in the session's transcript on this machine, as it does every tool
 call and prompt.

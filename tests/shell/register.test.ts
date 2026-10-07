@@ -46,7 +46,7 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0 }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0 }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size = 100): Seen => {
@@ -65,6 +65,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   answers.agents = []
   answers.listed = 0
   answers.isListBroken = false
+  answers.isStopBroken = false
   answers.isCompactBroken = false
   answers.isStoreBroken = false
   answers.rows = {}
@@ -186,7 +187,11 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
   })
   on('turn.complete', () => ({ text: '' }))
-  on('classic.Stop', () => ({}))
+  // Another plugin's Stop hook, below this one.
+  on('classic.Stop', () => {
+    if (answers.isStopBroken) throw new Error('another hook failed')
+    return {}
+  })
   on('classic.SessionStart', () => ({}))
   on('classic.PostModelSwitch', () => ({}))
   on('session.compact', ($, e) => {
@@ -313,6 +318,21 @@ test('the TTL comes from the transcript when the turn stops', { options: { showB
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 55 min')
   expect(seen.processes).toBe(0)
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+})
+
+test('where another Stop hook fails the transcript is still named, and a tick reads it', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, `${ASSISTANT_1H}\n`)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  answers.isStopBroken = true
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false }).catch(() => undefined)
+  expect((await run($, 'report')).text).toContain('Transcript: path known yes')
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  // Past the time a hook is given, the read is done without the hook.
+  await clock.advance(16 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect((await run($, 'report')).text).toContain('next try none')
 })
 
 test('with reading the transcript switched off the file is never touched', { options: { showBelowMinutes: 0, readTranscript: false } }, async ($, on) => {
@@ -472,7 +492,8 @@ test('/bell report gathers what an issue needs and shows no address and no path'
   expect(rows[5]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
   expect(rows[6]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
   expect(rows[7]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
-  expect(rows[8]).toBe("The plugin's last notices: none")
+  expect(rows[8]).toBe("Events seen: SessionStart 0, with the transcript's path 0 · Stop 1, with the path 1 · requests of the main thread 1")
+  expect(rows[9]).toBe("The plugin's last notices: none")
   expect(rows.join('\n')).not.toMatch(/gateway|session\.jsonl|\/work/)
   expect(seen.logs).toEqual([])
 })
@@ -2254,7 +2275,13 @@ test('an option set to a word it does not take reads as the default', { options:
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const report = await status($)
   expect(report).toContain('mode prepare-compact')
-  expect(report).not.toContain('is set to')
+  // Where the manifest lists the words an option takes, Claude Code hands over the default and there is
+  // nothing to say. Where it lists none (the form for a place that takes no such lists), the word comes
+  // through and the report names it.
+  if (report.includes('is set to')) {
+    expect(report).toContain('mode is set to "kep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used')
+    expect(report).toContain('ttl is set to "10m", which is not one of auto, 5m, 1h')
+  }
 })
 
 test('the note is also taken under the name the parameter had before 0.2.7', { options: { compactCountdown: 30 } }, async ($, on) => {
