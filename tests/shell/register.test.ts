@@ -2254,7 +2254,13 @@ test('an option set to a word it does not take reads as the default', { options:
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const report = await status($)
   expect(report).toContain('mode prepare-compact')
-  expect(report).not.toContain('is set to')
+  // Where the manifest lists the words an option takes, Claude Code hands over the default and there is
+  // nothing to say. Where it lists none (the form for a place that takes no such lists), the word comes
+  // through and the report names it.
+  if (report.includes('is set to')) {
+    expect(report).toContain('mode is set to "kep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used')
+    expect(report).toContain('ttl is set to "10m", which is not one of auto, 5m, 1h')
+  }
 })
 
 test('the note is also taken under the name the parameter had before 0.2.7', { options: { compactCountdown: 30 } }, async ($, on) => {

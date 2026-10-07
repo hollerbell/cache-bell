@@ -31,6 +31,9 @@ What changed in each version, newest first. `/bell status` says which version ru
   `display`) are a list to pick from in `/config` again, as they were before 0.2.7. A word in
   `settings.json` that an option does not accept is still replaced by the default. Claude Code now checks
   this itself, so `/bell status` no longer names the word.
+- Installed from Anthropic's plugin directory, these options stay rows of free text: the directory does
+  not take such a list. A word an option does not take is replaced by the default there too, and
+  `/bell status` says so and names the words the option takes.
 
 ## 0.2.8
 

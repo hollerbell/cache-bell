@@ -35,24 +35,12 @@
       "type": "string",
       "title": "Mode",
       "description": "notify: countdown and question only. keep: renew the cache silently, three times at most, never compact. prepare-compact: ask, renew twice, ask again, announce, compact. compact-only: compact before the cache expires. custom: use the five options below.",
-      "options": [
-        "notify",
-        "keep",
-        "prepare-compact",
-        "compact-only",
-        "custom"
-      ],
       "default": "prepare-compact"
     },
     "ask": {
       "type": "string",
       "title": "Ask (custom mode)",
       "description": "When to ask during one idle period. first: the first time only. every: every time. never: not at all.",
-      "options": [
-        "first",
-        "every",
-        "never"
-      ],
       "default": "first"
     },
     "maxRenewals": {
@@ -67,10 +55,6 @@
       "type": "string",
       "title": "Renewal method (custom mode)",
       "description": "fork: a silent side request that leaves no trace in the conversation. none: do not keep the cache warm.",
-      "options": [
-        "fork",
-        "none"
-      ],
       "default": "fork"
     },
     "prepareBeforeCompact": {
@@ -107,11 +91,6 @@
       "type": "string",
       "title": "Cache TTL",
       "description": "auto: read from the session's transcript. 5m or 1h: set by hand.",
-      "options": [
-        "auto",
-        "5m",
-        "1h"
-      ],
       "default": "auto"
     },
     "minContextTokens": {
@@ -133,12 +112,6 @@
       "type": "string",
       "title": "Compaction asked for by the session",
       "description": "What happens when Claude itself asks for a compaction (the compact skill). confirm: you are asked and it compacts when the countdown ends without your answer. wait: you are asked and the request is dropped unless you say Compact. auto: it compacts right after the turn. off: Claude cannot ask.",
-      "options": [
-        "confirm",
-        "wait",
-        "auto",
-        "off"
-      ],
       "default": "confirm"
     },
     "askLeadMinutes": {
@@ -152,12 +125,6 @@
       "type": "string",
       "title": "Display",
       "description": "Where the countdown shows. band: above the prompt. status: in the status line. both: in both. off: nowhere.",
-      "options": [
-        "band",
-        "status",
-        "both",
-        "off"
-      ],
       "default": "band"
     },
     "showBelowMinutes": {
