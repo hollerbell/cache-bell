@@ -1,11 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
-import { resolveConfig } from '../../core/config'
 import { initialState } from '../../core/decide'
 import { REPORT_HEAD, digestOf, errorCode, noticeHead, problemReport } from '../../core/report'
 import type { ReportFacts } from '../../core/report'
 import { TTL_1H } from '../../core/timing'
 import type { State } from '../../core/types'
+import { NOTIFY, configOf } from './options'
 
 const T0 = Date.UTC(2026, 0, 12, 9)
 
@@ -71,6 +71,7 @@ const facts = (over: Partial<ReportFacts> = {}): ReportFacts => ({
   version: '0.2.10',
   isWindows: true,
   surface: 'terminal',
+  surfaces: { now: ['terminal'], asked: { terminal: 12 }, drawn: { terminal: 12 }, changes: [] },
   model: 'claude-test-1',
   env: {},
   askedTtlMs: null,
@@ -83,14 +84,15 @@ const facts = (over: Partial<ReportFacts> = {}): ReportFacts => ({
 })
 
 test('the report says what an issue needs, row by row', () => {
-  const config = resolveConfig({})
+  const config = configOf({})
   const state: State = { ...initialState(config), phase: 'WARM', anchorAt: T0 - 40000, ttlMs: TTL_1H, ttlSource: 'transcript' }
   expect(problemReport(state, T0, config, facts()).split('\n')).toEqual([
     REPORT_HEAD,
     'Cache Bell 0.2.10 · Claude Code 2.1.292 · Windows · terminal',
+    'Surfaces: terminal · band asked for: terminal 12 · drawn: terminal 12 · seen: nothing',
     'Model: claude-test-1 · Bedrock no · Vertex no · Foundry no · own API address no',
     'Cache settings: DISABLE_PROMPT_CACHING no · FORCE_PROMPT_CACHING_5M no · CLAUDE_CODE_PROMPT_CACHE_TTL not set · TTL asked for none',
-    'Options: enabled true · mode prepare-compact · ask first · maxRenewals 2 · renewMethod fork · prepareBeforeCompact true · compact true · ttl auto · minContextTokens 100000 · compactCountdown 30 · askLeadMinutes 0 · sessionCompact confirm · display band · showBelowMinutes 30 · readTranscript true · texts changed: none',
+    'Options: enabled true · profile bellcompact · compactLevelK 0 · compactContextNotices true · compactOnRequest confirm · compactCountdown 30 · idleMinContextK 80 · idleAsk first · idleAskAheadMinutes 0 · idleRenewals 2 · idleCompact on · idleAnnounce true · cacheTtl auto · cacheRequestHour ask · display band · displayBelowMinutes 30 · texts changed: none',
     'State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 73 678 tokens · renewals 0',
     'Transcript: path known yes · exists yes · size 2 512 331 bytes · read for the TTL 0:38 ago · failed reads 0 · next try none',
     'End of the transcript: responses of the main thread 1 · usage of the last: input_tokens=2 cache_creation_input_tokens=5287 cache_read_input_tokens=91285 cache_creation{ephemeral_5m_input_tokens=0 ephemeral_1h_input_tokens=5287} output_tokens=120 service_tier server_tool_use{web_search_requests=0 nested}',
@@ -99,8 +101,38 @@ test('the report says what an issue needs, row by row', () => {
   ])
 })
 
+test('the report says on which surfaces the band was asked for and drawn, and which came and went', () => {
+  const config = configOf({})
+  const report = problemReport(
+    initialState(config),
+    T0,
+    config,
+    facts({
+      surfaces: {
+        now: ['terminal', 'desktop', '/srv/jane/x'],
+        asked: { terminal: 30, desktop: 4, 'a surface named by a client': 1 },
+        drawn: { terminal: 30 },
+        changes: [
+          { surface: 'desktop', change: 'attached' },
+          { surface: 'D:\\people\\jane', change: 'attached' },
+          { surface: 'desktop', change: 'left' },
+        ],
+      },
+    }),
+  )
+  expect(report.split('\n')[2]).toBe(
+    'Surfaces: terminal, desktop, (not shown) · band asked for: terminal 30, desktop 4, (not shown) 1 · drawn: terminal 30 · seen: desktop attached, (not shown) attached, desktop left',
+  )
+  expect(problemReport(initialState(config), T0, config, facts({ surfaces: { now: null, asked: {}, drawn: {}, changes: [] } })).split('\n')[2]).toBe(
+    'Surfaces: not read · band asked for: none · drawn: none · seen: nothing',
+  )
+  expect(problemReport(initialState(config), T0, config, facts({ surfaces: { now: ['terminal'], asked: {}, drawn: {}, changes: null } })).split('\n')[2]).toBe(
+    'Surfaces: terminal · band asked for: none · drawn: none · seen: not watched',
+  )
+})
+
 test('what the person wrote or set is never in the report: an address, a prompt, a path, a key', () => {
-  const config = resolveConfig({ preparePrompt: 'my own secret prompt', ttl: '5m', mode: 'notify' })
+  const config = configOf({ idleAnnouncePrompt: 'my own secret prompt', cacheTtl: '5m', ...NOTIFY })
   const report = problemReport(
     initialState(config),
     T0,
@@ -120,9 +152,10 @@ test('what the person wrote or set is never in the report: an address, a prompt,
   )
   expect(report.split('\n').slice(1)).toEqual([
     'Cache Bell version unknown · Claude Code version not seen · not Windows · surface unknown',
+    'Surfaces: terminal · band asked for: terminal 12 · drawn: terminal 12 · seen: nothing',
     'Model: (not shown) · Bedrock yes · Vertex no · Foundry no · own API address yes',
     'Cache settings: DISABLE_PROMPT_CACHING yes · FORCE_PROMPT_CACHING_5M no · CLAUDE_CODE_PROMPT_CACHE_TTL (not shown) · TTL asked for 1h',
-    'Options: enabled true · mode notify · ask first · maxRenewals 0 · renewMethod none · prepareBeforeCompact false · compact false · ttl 5m · minContextTokens 100000 · compactCountdown 30 · askLeadMinutes 0 · sessionCompact confirm · display band · showBelowMinutes 30 · readTranscript true · texts changed: preparePrompt',
+    'Options: enabled true · profile bellcompact · compactLevelK 0 · compactContextNotices true · compactOnRequest confirm · compactCountdown 30 · idleMinContextK 80 · idleAsk first · idleAskAheadMinutes 0 · idleRenewals 0 · idleCompact off · idleAnnounce true · cacheTtl 5m · cacheRequestHour ask · display band · displayBelowMinutes 30 · texts changed: idleAnnouncePrompt',
     'State: UNKNOWN · TTL 5m from config · TTL unread no · last request never · context unknown · renewals 0',
     'Transcript: path known yes · exists not asked · size unknown · read for the TTL never · failed reads 2 · next try in 1:00',
     'End of the transcript: not read: EACCES',
@@ -134,7 +167,7 @@ test('what the person wrote or set is never in the report: an address, a prompt,
 })
 
 test('with no transcript there is nothing to read, and the report says so', () => {
-  const config = resolveConfig({})
+  const config = configOf({})
   const report = problemReport(initialState(config), T0, config, facts({ transcript: { isKnown: false, exists: null, size: null, readAt: null, failed: 0, rereadAt: null }, tail: null }))
   expect(report).toContain('Transcript: path known no · exists not asked')
   expect(report).toContain('End of the transcript: nothing to read')

@@ -1,6 +1,7 @@
 // The question in the band: its choices and their digits, why it is asked, the countdown whose line swings
 // between two colours, and what the transcript and the session are told. Plain values; the shell draws them.
 
+import { compacts } from './decide'
 import type { Extension } from './extension'
 import type { AskReason, Config, State } from './types'
 import { BAND_PREFIX, MARK, NAME, PLUGIN, formatLeft, formatCount } from './view'
@@ -112,11 +113,11 @@ export const CACHE_SOON = 'cache expires soon'
 // How many renewals the plugin would still do without an answer, in words; nothing in a mode that does not
 // renew.
 const renewalsLeft = (state: State, config: Config): string => {
-  if (config.renewMethod === 'none' || config.maxRenewals === 0) return ''
+  if (config.maxRenewals === 0) return ''
   const left = Math.max(0, config.maxRenewals - state.renewals)
   if (left === 0) return ', no automatic renewals left'
   // What comes after them, so the person sees where the course leads.
-  const then = config.compact ? 'then compacts' : 'then expires'
+  const then = compacts(state, config) ? 'then compacts' : 'then expires'
   return `, ${left} automatic ${left === 1 ? 'renewal' : 'renewals'} left, ${then}`
 }
 

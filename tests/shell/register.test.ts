@@ -1,12 +1,22 @@
 import type { On, SessionMessage } from 'claude-code'
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as kitTest } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { resolveConfig } from '../../core/config'
-import { initialState } from '../../core/decide'
+import { HOUR_NOT_GRANTED, initialState } from '../../core/decide'
 import type { State } from '../../core/types'
+import { UNNAMED, UNSEEN } from '../../core/view'
+import { BASE, COMPACT_ONLY, KEEP, NOTIFY, configOf } from '../core/options'
+
+// Every test starts from the options the core's tests start from, and names only what it changes.
+const test = ((name: string, how: object | (() => unknown), body?: () => unknown) =>
+  typeof how === 'function'
+    ? kitTest(name, { options: BASE }, how as never)
+    : kitTest(name, { ...how, options: { ...BASE, ...(how as { options?: object }).options } } as never, body as never)) as typeof kitTest
 
 const S = 1000
+// Simulated minutes run the plugin's timers second by second: a test that covers an hour or more takes a few
+// seconds, and on a busy machine more than the 5 the kit gives a test.
+const LONG = 30 * S
 // A Monday morning: 2026-01-12 09:00 UTC.
 const T0 = Date.UTC(2026, 0, 12, 9)
 
@@ -30,10 +40,19 @@ const ASSISTANT_1H = JSON.stringify({
   message: { usage: { cache_creation: { ephemeral_1h_input_tokens: 900, ephemeral_5m_input_tokens: 0 } } },
 })
 
+// What a response on the five-minute cache leaves in the transcript: the usual since Claude Code 2.1.293.
+const ASSISTANT_5M = JSON.stringify({
+  type: 'assistant',
+  isSidechain: false,
+  message: { usage: { cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 900 } } },
+})
+
 const SUMMARY: SessionMessage[] = [{ role: 'user', text: 'Summary of the conversation so far.', toolUses: [] }]
 
 type Seen = {
   envAsked: string[]
+  // what the plugin wrote into the environment: 'NAME=value', or 'NAME unset'
+  envSet: string[]
   toasts: string[]
   commands: string[]
   processes: number
@@ -47,13 +66,14 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, only: '' }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
-const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size = 100): Seen => {
-  const seen: Seen = { envAsked: [], toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map([['intro', 1]]) }
+const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, transcript = ASSISTANT_5M, size = 100): Seen => {
+  const seen: Seen = { envAsked: [], envSet: [], toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map<string, unknown>([['intro', 2]]) }
   answers.tailExit = 0
   answers.grown = 0
+  answers.appended = ''
   answers.compactSkip = false
   answers.hasTranscript = true
   answers.forkRead = 143985
@@ -68,12 +88,17 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   answers.isListBroken = false
   answers.isStopBroken = false
   answers.only = ''
+  answers.usages = 0
+  answers.isUsageBroken = false
   answers.isCompactBroken = false
   answers.isStoreBroken = false
   answers.rows = {}
   answers.sets = []
   answers.looked = 0
   answers.draft = ''
+  answers.settings = {}
+  answers.markGate = null
+  answers.takeOutGate = null
   // `answers.rows` are the plugin's own rows of /config, by key; a row named "locked" refuses a change.
   on('config.list', (() => ({
     value: [
@@ -83,7 +108,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   })) as never)
   on('config.set', (($: unknown, e: { key: string; value: string }) => {
     if (e.key === 'theme') answers.theme = e.value
-    else if (e.key.endsWith('.ttl')) return { deny: 'a managed setting' }
+    else if (e.key.endsWith('.cacheTtl')) return { deny: 'a managed setting' }
     else {
       answers.rows[e.key] = e.value
       answers.sets.push(`${e.key}=${String(e.value)}`)
@@ -93,6 +118,15 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   on('env.get', ($, e) => {
     seen.envAsked.push(e.name)
     return { value: env[e.name] }
+  })
+  // `answers.markGate`: setting the plugin's mark waits for it; `answers.takeOutGate`: taking the TTL out does.
+  on('env.set', async ($, e) => {
+    if (answers.markGate !== null && e.name === 'CACHE_BELL_PROMPT_CACHE_TTL' && e.value !== undefined) await answers.markGate
+    if (answers.takeOutGate !== null && e.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' && e.value === undefined) await answers.takeOutGate
+    if (e.value === undefined) delete env[e.name]
+    else env[e.name] = e.value
+    seen.envSet.push(e.value === undefined ? `${e.name} unset` : `${e.name}=${e.value}`)
+    return { value: undefined }
   })
   // What the plugin built on this one keeps in the session; this plugin's own state stays the engine's.
   // `answers.stored` is the state an earlier instance of this plugin left behind, read until this one
@@ -109,7 +143,7 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
     seen.commands.push(e.name)
     return { value: { command: e.name } }
   })
-  on('settings.read', () => ({ value: {} }))
+  on('settings.read', () => ({ value: answers.settings }))
   on('tool.register', ($, e) => {
     seen.commands.push(`tool ${e.name}`)
     return { value: { tool: `mcp__cache-bell__${e.name}` } }
@@ -135,13 +169,17 @@ const stubs = (on: On, env: Record<string, string> = {}, transcript = '', size =
   on('session.root', () => ({ value: '/work/my project' }))
   on('session.cwd', () => ({ value: '/work/my project/src' }))
   // The plugin's own manifest, or the session's transcript.
-  on('fs.read', ($, e) => ({ value: e.path.endsWith('plugin.json') ? '{ "name": "cache-bell", "version": "0.1.0" }' : transcript }))
+  on('fs.read', ($, e) => ({ value: e.path.endsWith('plugin.json') ? '{ "name": "cache-bell", "version": "0.1.0" }' : transcript + answers.appended }))
   on('process.run', ($, e) => {
     seen.processes += 1
     seen.argv.push([...e.argv])
     return { value: { exitCode: answers.tailExit, stdout: transcript, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: answers.tokens, window: 200000, percent: 22 }, rateLimits: [] } }))
+  on('session.usage', () => {
+    answers.usages += 1
+    if (answers.isUsageBroken) throw new Error('no usage')
+    return { value: { startedAt: 0, context: { tokens: answers.tokens, window: 200000, percent: 22 }, rateLimits: [] } }
+  })
   on('store.get', ($, e) => ({ value: seen.store.get(e.key) }))
   on('store.set', ($, e) => {
     if (answers.isStoreBroken) throw new Error('disk full')
@@ -264,7 +302,7 @@ const logged = (seen: Seen): unknown[] =>
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([, entry]) => entry)
 
-test('the band counts down from the last request and turns cold', { options: { mode: 'custom', ask: 'never', renewMethod: 'none', compact: false } }, async ($, on) => {
+test('the band counts down from the last request and turns cold', { options: { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' }, timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -274,11 +312,11 @@ test('the band counts down from the last request and turns cold', { options: { m
   // The request goes out at T0 and the turn runs 20 s: the countdown started with the request.
   await turn($, clock, 20 * S)
   for (const surface of ['terminal', 'desktop'] as const) {
-    expect(await bandText($, surface)).toBe('h⣿ Cache Bell: prompt cache expires in 4:15 · lifetime 5m assumed, not yet seen in the data')
+    expect(await bandText($, surface)).toBe('h⣿ Cache Bell: prompt cache expires in 4:15')
   }
 
   await clock.advance(254 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01')
   expect(seen.toasts).toEqual([])
 
   await clock.advance(S)
@@ -291,7 +329,7 @@ test('the band counts down from the last request and turns cold', { options: { m
 
   // New work warms it again.
   await turn($, clock, S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:34 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:34')
 })
 
 test('nothing is drawn while a turn runs or a survey shows', async ($, on) => {
@@ -314,10 +352,10 @@ test('a subagent request does not move the anchor', async ($, on) => {
   await turn($, clock, 0)
   await clock.advance(100 * S)
   await turn($, clock, 0, 'agent-1')
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55')
 })
 
-test('the TTL comes from the transcript when the turn stops', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('the TTL comes from the transcript when the turn stops', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -328,7 +366,53 @@ test('the TTL comes from the transcript when the turn stops', { options: { showB
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
 })
 
-test('where another Stop hook fails the transcript is still named, and a tick reads it', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('a response written to the transcript after the Stop hook is read a few seconds later', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, '{"type":"user"}\n')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  // Nothing was appended yet: the first look finds the same file and waits for the next.
+  await clock.advance(4 * S)
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  answers.appended = `${ASSISTANT_1H}\n`
+  answers.grown = 500
+  await clock.advance(10 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect((await run($, 'report')).text).toContain('next try none')
+})
+
+test('the last of the late looks, half a minute on, still finds the response', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, {}, '{"type":"user"}\n')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  await clock.advance(20 * S)
+  answers.appended = `${ASSISTANT_1H}\n`
+  answers.grown = 500
+  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
+  await clock.advance(25 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+})
+
+test('a transcript that grows with no response is read three more times after a turn, no more', { options: NOTIFY }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, '{"type":"user"}\n', LARGE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect(seen.processes).toBe(1)
+  for (let second = 1; second <= 120; second += 1) {
+    answers.grown = second * 100
+    await clock.advance(S)
+  }
+  expect(seen.processes).toBe(4)
+  expect((await run($, 'report')).text).toContain('next try none')
+})
+
+test('where another Stop hook fails the transcript is still named, and a tick reads it', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -343,7 +427,7 @@ test('where another Stop hook fails the transcript is still named, and a tick re
   expect((await run($, 'report')).text).toContain('next try none')
 })
 
-test('with reading the transcript switched off the file is never touched', { options: { showBelowMinutes: 0, readTranscript: false } }, async ($, on) => {
+test('with reading the transcript switched off the file is never touched', { options: { displayBelowMinutes: 0, cacheTtl: 'settings' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, ASSISTANT_1H)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -355,7 +439,7 @@ test('with reading the transcript switched off the file is never touched', { opt
   expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
 })
 
-test('a transcript too large to read is read by its tail', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('a transcript too large to read is read by its tail', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, { OS: 'Windows_NT' }, `${ASSISTANT_1H}\n`, 4 * 1024 * 1024 + 1)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -372,7 +456,590 @@ test('the settings give the TTL before the first response', async ($, on) => {
   expect(await status($)).toMatch(/Cache TTL: 1h \(from the Claude Code settings, not yet confirmed by a response\)/)
 })
 
-test('a TTL set in the options is not overridden by the transcript', { options: { ttl: '5m', mode: 'notify' } }, async ($, on) => {
+test('an hour named by the settings is a guess until a response in the transcript shows it', { options: { displayBelowMinutes: 0 }, timeoutMs: LONG }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, '{"type":"user"}\n')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(from the Claude Code settings, not yet confirmed by a response\)/)
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNSEEN}`)
+  // Past the time the hour would ask at: nothing is asked or sent.
+  await clock.advance(2200 * S)
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNSEEN}`)
+  expect(seen.did).toEqual([])
+  // The next response shows the hour: from then on the transcript counts, and the hour's question comes.
+  answers.appended = `${ASSISTANT_1H}\n`
+  answers.grown = 500
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect(await bandText($)).toMatch(/^h⣿ Cache Bell: prompt cache expires in \d+ min$/)
+  await clock.advance(2100 * S)
+  expect((await question($)).text).toMatch(/^h⣿ Cache Bell: Cache expires soon \(144k tokens\)/)
+})
+
+// cacheRequestHour: the variable Claude Code reads, and the plugin's mark that says the value is its own.
+const HOUR_SET = ['CACHE_BELL_PROMPT_CACHE_TTL=1h', 'CLAUDE_CODE_PROMPT_CACHE_TTL=1h']
+const HOUR_DROPPED = ['CLAUDE_CODE_PROMPT_CACHE_TTL unset', 'CACHE_BELL_PROMPT_CACHE_TTL unset']
+const NO_RESPONSE = '{"type":"user"}\n'
+// A mode that neither renews nor compacts: the cache is left to go cold.
+const IDLE = { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' }
+
+test('asked for, the hour goes out with the first request of a new conversation, and the transcript has the last word', { options: { cacheRequestHour: 'on', displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(seen.envSet).toEqual([])
+  expect(await status($)).toMatch(/Hour-long cache: on, asked for at the next moment the cache is cold anyway/)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(asked for by Cache Bell \(cacheRequestHour\), not yet confirmed by a response\)\nHour-long cache: asked for, not yet confirmed by a response/)
+  expect(await run($, 'report')).toMatchObject({ text: expect.stringMatching(/CLAUDE_CODE_PROMPT_CACHE_TTL 1h \(set by Cache Bell\) · TTL asked for none/) })
+  // The next turn finds its own value in place: nothing is set again. Its response shows the hour.
+  answers.appended = `${ASSISTANT_1H}\n`
+  answers.grown = 500
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(seen.envSet).toEqual(HOUR_SET)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)\nHour-long cache: asked for and granted/)
+  expect(seen.toasts).toEqual([])
+})
+
+test('a response that shows five minutes after the hour was asked for is said once, and /bell status warns', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  answers.appended = `${ASSISTANT_5M}\n`
+  answers.grown = 500
+  await clock.advance(5 * S)
+  expect(seen.toasts).toEqual([HOUR_NOT_GRANTED])
+  expect(await status($)).toMatch(/Cache TTL: 5m \(read from the transcript\)\n⚠ Hour-long cache: asked for, but the API granted only 5 minutes/)
+  // The next turn's response says the same: nothing more is said.
+  await turn($, clock, 0)
+  answers.grown = 900
+  await clock.advance(5 * S)
+  expect(seen.toasts).toEqual([HOUR_NOT_GRANTED])
+})
+
+test('switched off, the plugin never takes away a TTL the person set', { options: { cacheRequestHour: 'off' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(400 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('on a warm cache the hour waits until the cache is cold anyway', { options: { ...IDLE, cacheRequestHour: 'on', displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  // A conversation with a response in it: its five-minute cache may still be warm.
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 5m \(read from the transcript\)/)
+  await clock.advance(60 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+  // Cold: the next request asks for the hour.
+  await clock.advance(400 * S)
+  expect(await bandText($)).toMatch(/expired/)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+})
+
+test('switched off, the plugin takes its own hour back as it is loaded, warm or not, and never reads it as the person\'s', { options: { ...IDLE, cacheRequestHour: 'off', displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  // What an instance with the option on left in the process; the API granted five minutes all the same.
+  const seen = stubs(on, { HOME: '/srv/jane', CACHE_BELL_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+  await clock.advance(60 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+})
+
+test('the plugin\'s own hour, kept from before a reload, is never read as a TTL the person set', { options: { ...IDLE, cacheRequestHour: 'on', displayBelowMinutes: 0 } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { ...OWN_HOUR })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(seen.envSet).toEqual([])
+  const shown = await status($)
+  expect(shown).toMatch(/Hour-long cache: /)
+  expect(shown).not.toMatch(/a TTL of your own is set|from the Claude Code settings/)
+})
+
+test('standing down for the plugin built on this one takes its own hour back, and never the person\'s', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CACHE_BELL_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  answers.isSuperseded = true
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(2 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+})
+
+// What a shell command sees of the TTL variable, and what the plugin does around it.
+const OWN_HOUR = { HOME: '/srv/jane', CACHE_BELL_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }
+// Taken out with the mark, the value first; put back with the mark first.
+const HIDE = ['CLAUDE_CODE_PROMPT_CACHE_TTL unset', 'CACHE_BELL_PROMPT_CACHE_TTL unset']
+const HIDDEN = [...HIDE, 'CACHE_BELL_PROMPT_CACHE_TTL=1h', 'CLAUDE_CODE_PROMPT_CACHE_TTL=1h']
+
+test('a shell command runs without the plugin\'s hour, which is back once it ends, also after a failure', { options: { ...IDLE, cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  const inside: (string | undefined)[] = []
+  let isBroken = false
+  on('tool.call', () => {
+    inside.push(`${env.CLAUDE_CODE_PROMPT_CACHE_TTL}/${env.CACHE_BELL_PROMPT_CACHE_TTL}`)
+    if (isBroken) throw new Error('the shell went away')
+    return { result: 'done' }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(await $.tool.call({ tool: 'Bash', command: 'claude -p hi' } as never)).toMatchObject({ result: 'done' })
+  expect(seen.envSet).toEqual(HIDDEN)
+  isBroken = true
+  await expect($.tool.call({ tool: 'PowerShell', command: 'claude -p hi' } as never)).rejects.toThrow()
+  expect(seen.envSet).toEqual([...HIDDEN, ...HIDDEN])
+  // Any other tool sees the hour as it is.
+  isBroken = false
+  await $.tool.call({ tool: 'Read', file_path: '/work/a' } as never)
+  // Neither the value nor the mark reaches a shell command.
+  expect(inside).toEqual(['undefined/undefined', 'undefined/undefined', '1h/1h'])
+  expect(seen.envSet).toEqual([...HIDDEN, ...HIDDEN])
+})
+
+test('of two shell commands at once, the hour comes back only after the last one', { options: { ...IDLE, cacheRequestHour: 'on', compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { ...OWN_HOUR })
+  const ends: (() => void)[] = []
+  on('tool.call', () => new Promise(resolve => {
+    ends.push(() => resolve({ result: 'done' }))
+  }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // The kit hands calls on while the test waits on one of its own.
+  const until = async (isDone: () => boolean) => {
+    for (let i = 0; i < 200 && !isDone(); i++) await status($)
+  }
+  let done = 0
+  void $.tool.call({ tool: 'Bash', command: 'sleep 1' } as never).then(() => (done += 1))
+  void $.tool.call({ tool: 'Bash', command: 'sleep 2' } as never).then(() => (done += 1))
+  await until(() => ends.length === 2)
+  expect(ends.length).toBe(2)
+  ends[0]?.()
+  await until(() => done === 1)
+  expect(seen.envSet).toEqual(HIDE)
+  ends[1]?.()
+  await until(() => done === 2)
+  expect(seen.envSet).toEqual(HIDDEN)
+})
+
+test('a subagent\'s shell command leaves the hour where it is: the main thread may send requests meanwhile', { options: { ...IDLE, cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  const inside: (string | undefined)[] = []
+  on('tool.call', () => {
+    inside.push(env.CLAUDE_CODE_PROMPT_CACHE_TTL)
+    return { result: 'done' }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'PowerShell', command: 'ls', agentId: 'a1' } as never)
+  expect(inside).toEqual(['1h', '1h'])
+  expect(seen.envSet).toEqual([])
+})
+
+test('while a subagent runs, the main thread\'s shell command keeps the hour too: the subagent sends requests meanwhile', { options: { ...IDLE, cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  const inside: (string | undefined)[] = []
+  on('tool.call', () => {
+    inside.push(env.CLAUDE_CODE_PROMPT_CACHE_TTL)
+    return { result: 'done' }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.agents = ['running']
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  answers.agents = ['completed']
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  expect(inside).toEqual(['1h', undefined])
+  expect(seen.envSet).toEqual(HIDDEN)
+})
+
+test('given back while a shell command runs, the hour is not taken out for the next one, nor put back after them', { options: { ...IDLE, compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  seen.store.set('hour', 'yes')
+  const ends: (() => void)[] = []
+  on('tool.call', () => new Promise(resolve => {
+    ends.push(() => resolve({ result: 'done' }))
+  }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const until = async (isDone: () => boolean) => {
+    for (let i = 0; i < 200 && !isDone(); i++) await status($)
+  }
+  let done = 0
+  void $.tool.call({ tool: 'Bash', command: 'sleep 1' } as never).then(() => (done += 1))
+  await until(() => ends.length === 1)
+  expect(seen.envSet).toEqual(HIDE)
+  await run($, 'hour off')
+  expect(seen.envSet).toEqual([...HIDE, ...HOUR_DROPPED])
+  // The person sets a TTL of their own; the next command leaves it alone.
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL = '5m'
+  void $.tool.call({ tool: 'Bash', command: 'sleep 2' } as never).then(() => (done += 1))
+  await until(() => ends.length === 2)
+  ends[0]?.()
+  ends[1]?.()
+  await until(() => done === 2)
+  expect(seen.envSet).toEqual([...HIDE, ...HOUR_DROPPED])
+  expect(env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('5m')
+})
+
+test('a shell command that starts while the hour is being put back waits for it, and is counted', { options: { ...IDLE, cacheRequestHour: 'on', compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  let open: () => void = () => {}
+  const ends: (() => void)[] = []
+  const inside: (string | undefined)[] = []
+  on('tool.call', () => new Promise(resolve => {
+    inside.push(`${env.CLAUDE_CODE_PROMPT_CACHE_TTL}/${env.CACHE_BELL_PROMPT_CACHE_TTL}`)
+    ends.push(() => resolve({ result: 'done' }))
+  }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const until = async (isDone: () => boolean) => {
+    for (let i = 0; i < 200 && !isDone(); i++) await status($)
+  }
+  let done = 0
+  void $.tool.call({ tool: 'Bash', command: 'sleep 1' } as never).then(() => (done += 1))
+  await until(() => ends.length === 1)
+  answers.markGate = new Promise(resolve => {
+    open = resolve
+  })
+  // The first command ends; putting the hour back stops at its mark.
+  ends[0]?.()
+  for (let i = 0; i < 20; i++) await status($)
+  void $.tool.call({ tool: 'Bash', command: 'sleep 2' } as never).then(() => (done += 1))
+  await status($)
+  answers.markGate = null
+  open()
+  await until(() => ends.length === 2)
+  // Put back first, then taken out for the new command, which runs without it.
+  expect(seen.envSet).toEqual([...HIDDEN, ...HIDE])
+  expect(inside).toEqual(['undefined/undefined', 'undefined/undefined'])
+  ends[1]?.()
+  await until(() => done === 2)
+  expect(seen.envSet).toEqual([...HIDDEN, ...HIDDEN])
+})
+
+test('a shell command that starts while the hour is being taken out for another waits until it is out', { options: { ...IDLE, cacheRequestHour: 'on', compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  let open: () => void = () => {}
+  const ends: (() => void)[] = []
+  const inside: (string | undefined)[] = []
+  on('tool.call', () => new Promise(resolve => {
+    inside.push(`${env.CLAUDE_CODE_PROMPT_CACHE_TTL}/${env.CACHE_BELL_PROMPT_CACHE_TTL}`)
+    ends.push(() => resolve({ result: 'done' }))
+  }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const until = async (isDone: () => boolean) => {
+    for (let i = 0; i < 200 && !isDone(); i++) await status($)
+  }
+  answers.takeOutGate = new Promise(resolve => {
+    open = resolve
+  })
+  let done = 0
+  // The first command stops while its hour is taken out; the second starts meanwhile.
+  void $.tool.call({ tool: 'Bash', command: 'sleep 1' } as never).then(() => (done += 1))
+  for (let i = 0; i < 20; i++) await status($)
+  void $.tool.call({ tool: 'PowerShell', command: 'sleep 2' } as never).then(() => (done += 1))
+  for (let i = 0; i < 20; i++) await status($)
+  expect(inside).toEqual([])
+  answers.takeOutGate = null
+  open()
+  await until(() => ends.length === 2)
+  // Neither of them saw the hour.
+  expect(inside).toEqual(['undefined/undefined', 'undefined/undefined'])
+  ends[0]?.()
+  ends[1]?.()
+  await until(() => done === 2)
+  expect(seen.envSet).toEqual(HIDDEN)
+})
+
+test('around a shell command the person\'s own TTL is left alone, and so is one set while it runs', { options: { ...IDLE, cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }
+  const seen = stubs(on, env)
+  const inside: (string | undefined)[] = []
+  on('tool.call', () => {
+    inside.push(env.CLAUDE_CODE_PROMPT_CACHE_TTL)
+    // Somebody else sets the variable while the command runs.
+    env.CLAUDE_CODE_PROMPT_CACHE_TTL = '5m'
+    return { result: 'done' }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  expect(seen.envSet).toEqual([])
+  // The plugin's hour, replaced while the command ran: what was set stays.
+  env.CACHE_BELL_PROMPT_CACHE_TTL = '1h'
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL = '1h'
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  expect(inside).toEqual(['1h', undefined])
+  expect(seen.envSet).toEqual(HIDE)
+  expect(env.CACHE_BELL_PROMPT_CACHE_TTL).toBeUndefined()
+  expect(env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('5m')
+})
+
+test('standing down leaves a TTL the person set as it is', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  answers.isSuperseded = true
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(2 * S)
+  expect(seen.envSet).toEqual([])
+})
+
+// A TTL of the person's own, in every place and spelling: the plugin asks for nothing over it.
+for (const [name, env, settings] of [
+  ['in the environment', { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }, {}],
+  ['in the environment, spelled so the plugin cannot read it', { CLAUDE_CODE_PROMPT_CACHE_TTL: '60m' }, {}],
+  ['as the five minutes forced', { FORCE_PROMPT_CACHING_5M: '1' }, {}],
+  ['in Claude Code\'s settings', {}, { promptCacheTtl: '5m' }],
+  ['in Claude Code\'s settings, spelled so the plugin cannot read it', {}, { promptCacheTtl: '60m' }],
+] as [string, Record<string, string>, Record<string, unknown>][]) {
+  test(`a TTL the person set ${name} is left alone`, { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on, { HOME: '/srv/jane', ...env }, NO_RESPONSE)
+    answers.settings = settings
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    expect(seen.envSet).toEqual([])
+    expect(await status($)).toMatch(/Hour-long cache: on, but a TTL of your own is set; nothing is asked for/)
+  })
+}
+
+// cacheTtl only says what the plugin counts with: Claude Code asks for its default all the same.
+test('cacheTtl 1h is no TTL of the person\'s own: the hour is asked for', { options: { cacheTtl: '1h', cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+})
+
+// Counted on five minutes, a cache that lasts the hour would be renewed and compacted for nothing.
+test('cacheTtl 5m holds the hour back as a TTL of the person\'s own does', { options: { cacheTtl: '5m', cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+  expect(await status($)).toMatch(/Hour-long cache: on, but not asked for, because cache-bell\.cacheTtl is 5m/)
+  expect((await run($, 'hour')).text).toContain('cache-bell.cacheTtl is 5m in /config, so Cache Bell does not ask for the hour-long cache.')
+})
+
+test('a TTL the person sets while the plugin holds its hour takes over before the next request', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { ...OWN_HOUR })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+  answers.settings = { promptCacheTtl: '5m' }
+  expect(await status($)).toMatch(/Hour-long cache: on, but a TTL of your own is set; nothing is asked for/)
+  await clock.advance(10 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+})
+
+test('a TTL the person sets over the plugin\'s hour takes its mark away: a later 1h of theirs stays theirs', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const env: Record<string, string> = { ...OWN_HOUR }
+  const seen = stubs(on, env)
+  on('tool.call', () => ({ result: 'done' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL = '5m'
+  await clock.advance(10 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(['CACHE_BELL_PROMPT_CACHE_TTL unset'])
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL = '1h'
+  await clock.advance(10 * S)
+  await turn($, clock, 0)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  expect(await status($)).toMatch(/Hour-long cache: on, but a TTL of your own is set; nothing is asked for/)
+  expect(seen.envSet).toEqual(['CACHE_BELL_PROMPT_CACHE_TTL unset'])
+  expect(env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h')
+})
+
+test('a TTL the person set before the plugin is loaded again takes over from its hour at once', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { ...OWN_HOUR })
+  answers.settings = { promptCacheTtl: '5m' }
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(seen.envSet).toEqual(HOUR_DROPPED)
+})
+
+test('a conversation whose transcript is not where it is looked for is not taken for a new one', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  answers.hasTranscript = false
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('a headless run asks for no hour', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+// Started from a command that kept the plugin's hour: a subagent's shell, a hook.
+test('a headless run that inherited the plugin\'s hour gives it back', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { ...OWN_HOUR })
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  expect(seen.envSet).toEqual(HIDE)
+})
+
+test('a headless run leaves a TTL of the person\'s own as it is', { options: { cacheRequestHour: 'on' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  expect(seen.envSet).toEqual([])
+})
+
+test('switched off, the plugin asks for no hour either', { options: { cacheRequestHour: 'on', enabled: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('in the off profile the plugin asks for no hour either', { options: { cacheRequestHour: 'on', profile: 'off' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+for (const options of [{ enabled: false }, { profile: 'off' }]) {
+  test(`loaded with ${JSON.stringify(options)}, the plugin takes its own hour back at once, and never the person's`, { options: { ...options, cacheRequestHour: 'on' } }, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    const seen = stubs(on, { ...OWN_HOUR })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    expect(seen.envSet).toEqual(HOUR_DROPPED)
+  })
+  test(`loaded with ${JSON.stringify(options)}, a TTL the person set stays`, { options: { ...options, cacheRequestHour: 'on' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, NO_RESPONSE)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    expect(seen.envSet).toEqual([])
+  })
+}
+
+test('in the watch profile nobody\'s answer asks for no hour', { options: { profile: 'watch' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('in the watch profile /bell hour on asks for the hour', { options: { profile: 'watch' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await run($, 'hour on')
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+})
+
+test('in the watch profile the answer "within the hour", kept on the machine, asks for the hour', { options: { profile: 'watch' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  seen.store.set('hour', 'yes')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+})
+
+test('in the watch profile cacheRequestHour on asks for the hour', { options: { profile: 'watch', cacheRequestHour: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+})
+
+test('in the watch profile the answer no asks for nothing', { options: { profile: 'watch' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  seen.store.set('hour', 'no')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('a TTL set in the options counts at once: the plugin asks and renews on it', { options: { cacheTtl: '5m' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
+  await clock.advance(210 * S)
+  expect((await question($)).text).toMatch(/^h⣿ Cache Bell: Cache expires soon \(144k tokens\), 2 automatic renewals left/)
+  await clock.advance(30 * S)
+  expect(seen.did).toEqual(['fork'])
+})
+
+// The default since 0.3.3: no band, only the status line. A question still shows above the prompt.
+test('shown in the status line only, the plugin still asks its question above the prompt', { options: { display: 'status', cacheTtl: '5m' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(210 * S)
+  expect((await question($)).text).toMatch(/^h⣿ Cache Bell: Cache expires soon \(144k tokens\), 2 automatic renewals left/)
+})
+
+test('with reading the transcript switched off and no TTL set nothing is renewed or compacted, and the band says how to name it', { options: { cacheTtl: 'settings' }, timeoutMs: LONG }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNNAMED}`)
+  expect(await status($)).toContain('Next: nothing is asked, renewed or compacted until you set the cacheTtl option')
+  // Past the time five minutes and the hour would ask and act at: nothing was sent.
+  await clock.advance(3100 * S)
+  expect(seen.did).toEqual([])
+  expect(answers.looked).toBe(0)
+  // An hour after the last request the cache is taken for gone.
+  await clock.advance(200 * S)
+  expect(await status($)).toContain('State: cold, expired')
+  expect(seen.did).toEqual([])
+})
+
+test('a TTL set in the options is not overridden by the transcript', { options: { ...NOTIFY, cacheTtl: '5m' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -380,7 +1047,8 @@ test('a TTL set in the options is not overridden by the transcript', { options: 
   await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await status($)).toBe(
     [
-      'version 0.1.0 · on, mode notify',
+      'version 0.1.0 · on, bellcompact[off]',
+      'When idle above 80K, Cache Bell asks what to do before the cache expires.',
       'State: warm',
       'Cache TTL: 5m (set in the plugin options)',
       'Last request to the API: 0:00 ago',
@@ -394,9 +1062,9 @@ test('/bell status answers without a turn and refuses what is not there yet', as
   mock.clock(on, { now: T0 })
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect(await status($)).toMatch(/^version 0\.1\.0 · on, mode prepare-compact\nState: unknown/)
+  expect(await status($)).toMatch(/^version 0\.1\.0 · on, bellcompact\[off\]\nWhen idle above 80K, .*\nState: unknown/)
   expect((await run($, '')).text).toMatch(/State: unknown/)
-  expect((await run($, 'now')).text).toBe('Usage: /bell status | report | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off')
+  expect((await run($, 'now')).text).toBe('Usage: /bell status | report | log [count] | hour [on|off] | set <level>K|off|default\n       | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off')
   for (const count of ['abc', '0', '201', '1.5', '-3']) expect((await run($, `log ${count}`)).text).toBe('Usage: /bell log [count], 1 to 200.')
   expect((await run($, 'log 200')).text).not.toMatch(/^Usage/)
   expect((await run($, 'log')).text).not.toMatch(/^Usage/)
@@ -474,7 +1142,7 @@ test('a status asked for while a turn runs is said at once, as a notice of one l
   await clock.advance(8 * S)
   // The command itself answers nothing: Claude Code would print it only after the turn.
   for (const args of ['', 'status']) expect(await run($, args)).toEqual({})
-  expect(seen.logs).toEqual(Array(2).fill('version 0.1.0 · on, mode prepare-compact · State: busy (a turn is running) · Cache TTL: 5m (assumed, not yet seen in the data) · Last request to the API: 0:08 ago · Context: 143 985 tokens'))
+  expect(seen.logs).toEqual(Array(2).fill('version 0.1.0 · on, bellcompact[off] · When idle above 80K, Cache Bell asks first, renews the cache up to 2 times, then compacts before it expires. · State: busy (a turn is running) · Cache TTL: 5m (read from the transcript) · Last request to the API: 0:08 ago · Context: 143 985 tokens'))
   // The other verbs answer as ever.
   expect((await run($, 'log')).text).not.toMatch(/^Usage/)
 
@@ -496,12 +1164,13 @@ test('/bell report gathers what an issue needs and shows no address and no path'
   await clock.advance(40 * S)
   const rows = ((await run($, 'report')).text ?? '').split('\n')
   expect(rows[1]).toBe('Cache Bell 0.1.0 · Claude Code version not seen · Windows · terminal')
-  expect(rows[2]).toBe('Model: claude-test · Bedrock yes · Vertex no · Foundry no · own API address yes')
-  expect(rows[5]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
-  expect(rows[6]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
-  expect(rows[7]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
-  expect(rows[8]).toBe("Events seen: SessionStart 0, with the transcript's path 0 · Stop 1, with the path 1 · requests of the main thread 1")
-  expect(rows[9]).toBe("The plugin's last notices: none")
+  expect(rows[2]).toMatch(/^Surfaces: .* · band asked for: .* · drawn: .* · seen: nothing$/)
+  expect(rows[3]).toBe('Model: claude-test · Bedrock yes · Vertex no · Foundry no · own API address yes')
+  expect(rows[6]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
+  expect(rows[7]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
+  expect(rows[8]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
+  expect(rows[9]).toBe("Events seen: SessionStart 0, with the transcript's path 0 · Stop 1, with the path 1 · requests of the main thread 1")
+  expect(rows[10]).toBe("The plugin's last notices: none")
   expect(rows.join('\n')).not.toMatch(/gateway|session\.jsonl|\/work/)
   expect(seen.logs).toEqual([])
 })
@@ -516,7 +1185,13 @@ test('/bell report names a transcript that cannot be read and the notice that sa
   const text = (await run($, 'report')).text ?? ''
   expect(text).toContain('size 5 242 880 bytes · read for the TTL never · failed reads 1 · next try in 0:15')
   expect(text).toContain('End of the transcript: not read: exited with 1')
-  expect(text).toContain("The plugin's last notices: \n  transcript not read, it is tried again (exited with 1)")
+  expect(text).toContain("The plugin's last notices: none")
+  // The second failed read is told, and the report names it without the path.
+  await clock.advance(16 * S)
+  const again = (await run($, 'report')).text ?? ''
+  expect(again).toContain('failed reads 2')
+  expect(again).toMatch(/The plugin's last notices: \n  .*transcript not read/)
+  expect(again).not.toMatch(/The plugin's last notices:[\s\S]*session\.jsonl/)
 })
 
 test('a /clear seen as the end of the session forgets the cache', async ($, on) => {
@@ -564,7 +1239,17 @@ test('on Windows the end is read by PowerShell with the path inside the command'
   expect(seen.argv[0]?.[4]).toContain('[Math]::Min($f.Length,1048576)')
 })
 
-test('a transcript that did not grow is not read again, and a confirmed TTL only now and then', { options: { mode: 'notify' } }, async ($, on) => {
+test('on Windows PowerShell is started by its full path under SystemRoot, not looked up by name', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { OS: 'Windows_NT', SystemRoot: 'C:\\WINDOWS' }, `${ASSISTANT_1H}\n`, LARGE)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: 'C:\\work\\session.jsonl', stop_hook_active: false })
+  expect(seen.argv[0]?.[0]).toBe('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+})
+
+test('a transcript that did not grow is not read again, and a confirmed TTL only now and then', { options: NOTIFY }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -600,11 +1285,15 @@ test('a transcript that cannot be read leaves the TTL a guess: nothing is sent o
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
-  expect(seen.logs).toEqual(['transcript not read, it is tried again: Error: tail exited with 1'])
+  // One failure is not said yet: the next try may go through.
+  expect(seen.logs).toEqual([])
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache: lifetime not known yet, the transcript could not be read · nothing is renewed or compacted until it is')
+  // The first retry, after 15 seconds, fails too: now it is said.
+  await clock.advance(16 * S)
+  expect(seen.logs).toEqual(['transcript not read, it is tried again: Error: tail exited with 1'])
   // Past the time the assumed five minutes would ask and renew at. The read was tried again after 15
   // seconds and after a minute more; the failure is said once.
-  await clock.advance(280 * S)
+  await clock.advance(264 * S)
   expect(seen.processes).toBe(3)
   expect(seen.logs.length).toBe(1)
   expect(seen.did).toEqual([])
@@ -616,6 +1305,20 @@ test('a transcript that cannot be read leaves the TTL a guess: nothing is sent o
   expect(await status($)).toMatch(/State: warm[\s\S]*Cache TTL: 1h \(read from the transcript\)/)
   // With 54 minutes left of the hour the band has nothing to say.
   expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+test('a read that fails once and goes through at the next try is not said at all', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
+  answers.tailExit = 1
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  answers.tailExit = 0
+  await clock.advance(16 * S)
+  expect(seen.processes).toBe(2)
+  expect(seen.logs).toEqual([])
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
 })
 
 test('a transcript that is gone in the middle of the tries ends them, and the plugin works with what it assumed', async ($, on) => {
@@ -645,7 +1348,7 @@ const transcriptOf = (secondsAgo: number): string => [dated(secondsAgo, 'user'),
 
 const resume = ($: Engine, extra: Record<string, unknown> = {}) => $.classic.SessionStart({ source: 'resume', transcript_path: '/work/session.jsonl', ...extra } as never)
 
-test('a resumed session knows its cache at once: the TTL and the last request from the transcript', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('a resumed session knows its cache at once: the TTL and the last request from the transcript', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, transcriptOf(850))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -663,7 +1366,7 @@ test('a resumed session knows its cache at once: the TTL and the last request fr
 
 const BY_ID = '/srv/jane/.claude/projects/-work-my-project/abcd1234-0000-4000-8000-000000000000.jsonl'
 
-test('where no event names the transcript, it is found by the session id after the turn and read', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('where no event names the transcript, it is found by the session id after the turn and read', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
   answers.only = BY_ID
@@ -693,7 +1396,7 @@ test('a session resumed in a process that is told nothing is taken up from the t
   expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 14 min ago/)
 })
 
-test('with reading the transcript switched off it is not looked for by the session id either', { options: { readTranscript: false } }, async ($, on) => {
+test('with reading the transcript switched off it is not looked for by the session id either', { options: { cacheTtl: 'settings' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, { HOME: '/srv/jane' }, transcriptOf(850))
   answers.only = BY_ID
@@ -751,7 +1454,7 @@ test('a session resumed after its cache ran out is cold, and nobody is told', as
   expect(seen.toasts).toEqual([])
 })
 
-test('where the transcript is not read, a resumed session counts from the time Claude Code gives', { options: { readTranscript: false } }, async ($, on) => {
+test('where the transcript is not read, a resumed session counts from the time Claude Code gives', { options: { cacheTtl: 'settings' } }, async ($, on) => {
   mock.clock(on, { now: T0 })
   stubs(on, {}, transcriptOf(850))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -760,7 +1463,32 @@ test('where the transcript is not read, a resumed session counts from the time C
   expect(answers.looked).toBe(0)
 })
 
-test('with the TTL set in the options the last request still comes from the transcript', { options: { ttl: '5m' } }, async ($, on) => {
+test('where the transcript is not read, a resumed session stays a guess and nothing is sent on it', { options: { cacheTtl: 'settings' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, {}, transcriptOf(850))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($, { seconds_since_last_response: 120 })
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNNAMED}`)
+  // Past the time five minutes would ask, act and give up at: still warm, and nothing was sent.
+  await clock.advance(600 * S)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 5m \(assumed, not yet seen in the data\)/)
+  expect(seen.did).toEqual([])
+})
+
+test('a resumed session whose transcript shows no lifetime keeps what the settings named as a guess', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const plain = dated(115, 'assistant', { message: { model: 'claude-test', usage: { input_tokens: 2, output_tokens: 9 } } })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, [dated(120, 'user'), plain, ''].join('\n'))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await resume($)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(from the Claude Code settings, not yet confirmed by a response\)\nLast request to the API: 2:00 ago/)
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNSEEN}`)
+  await clock.advance(600 * S)
+  expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(from the Claude Code settings/)
+  expect(seen.did).toEqual([])
+})
+
+test('with the TTL set in the options the last request still comes from the transcript', { options: { cacheTtl: '5m' } }, async ($, on) => {
   mock.clock(on, { now: T0 })
   stubs(on, {}, transcriptOf(200))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -786,7 +1514,7 @@ test('a session resumed right after a compaction is left alone, whatever time Cl
   expect(await bandText($)).toBe('drawn by Claude Code')
 })
 
-test('a resume inside the process reads the new transcript at once, though the old one was read a moment ago', { options: { showBelowMinutes: 0 } }, async ($, on) => {
+test('a resume inside the process reads the new transcript at once, though the old one was read a moment ago', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, transcriptOf(1200))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -819,10 +1547,33 @@ test('a model switch turns the cache cold and brings its TTL', async ($, on) => 
   await $.classic.PostModelSwitch({ cache_ttl: '1h', prompt_cache_warm: true } as never)
   const report = await status($)
   expect(report).toMatch(/State: cold, model changed/)
-  expect(report).toMatch(/Cache TTL: 1h \(reported at the model switch\)/)
+  expect(report).toMatch(/Cache TTL: 1h \(asked for at the model switch, not yet confirmed by a response\)/)
 })
 
-test('the display is touched only when its text changes', { options: { display: 'both', ttl: '1h', showBelowMinutes: 0 } }, async ($, on) => {
+test('the TTL a model switch brings is a guess until a response after it shows the lifetime', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 5m \(read from the transcript\)/)
+  await $.classic.PostModelSwitch({ cache_ttl: '1h', prompt_cache_warm: true } as never)
+  // A turn on the new model whose response is not in the transcript yet: the hour is only what was asked for.
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(asked for at the model switch, not yet confirmed by a response\)/)
+  expect(await bandText($)).toBe(`h⣿ Cache Bell: ${UNSEEN}`)
+  await clock.advance(600 * S)
+  expect(seen.did).toEqual([])
+  // Its response shows five minutes: they count.
+  answers.grown = 500
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect(await status($)).toMatch(/Cache TTL: 5m \(read from the transcript\)/)
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:33')
+})
+
+test('the display is touched only when its text changes', { options: { display: 'both', cacheTtl: '1h', displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1100,7 +1851,7 @@ const ownTurn = ($: Engine, clock: Clock) => turn($, clock, 0, undefined, false)
 test('before the cache runs out the plugin asks, and without an answer renews it', async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(209 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:06 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:06')
 
   await clock.advance(S)
   expect(await question($)).toMatchObject({
@@ -1113,12 +1864,12 @@ test('before the cache runs out the plugin asks, and without an answer renews it
   // The time runs out: one silent request beside the conversation, and the countdown starts over from it.
   await clock.advance(30 * S)
   expect(seen.did).toEqual(['fork'])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
   expect(await status($)).toMatch(/State: warm/)
 })
 
 for (const fork of ['unanswered', 'throws'] as const) {
-  test(`a renewal that gets no answer (${fork}) is tried once more, then nothing more is sent`, async ($, on) => {
+  test(`a renewal that gets no answer (${fork}) is tried once more, then nothing more is sent`, { timeoutMs: LONG }, async ($, on) => {
     const { clock, seen } = await idle($, on)
     answers.fork = fork
     await clock.advance(250 * S)
@@ -1150,7 +1901,7 @@ test('a real question cannot be taken down by the demo, and a message alone does
   expect(seen.did).toEqual(['fork'])
 })
 
-const leftBehind = (over: Partial<State>): State => ({ ...initialState(resolveConfig({})), anchorAt: T0, contextTokens: 143985, isAsked: true, ...over })
+const leftBehind = (over: Partial<State>): State => ({ ...initialState(configOf()), anchorAt: T0, ttlSource: 'transcript', contextTokens: 143985, isAsked: true, ...over })
 
 test('a question open when the plugin was loaded again is put up again for the time it has left', async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 215 * S })
@@ -1174,7 +1925,7 @@ for (const phase of ['RENEWING', 'PREPARING', 'COMPACTING'] as const) {
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
     await clock.advance(S)
     expect(seen.toasts).toEqual(['The plugin was loaded again in the middle of a step: nothing more is done until you work in this session again.'])
-    expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:33 · lifetime 5m assumed, not yet seen in the data · nothing will be done')
+    expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:33 · nothing will be done')
     await clock.advance(600 * S)
     expect(seen.did).toEqual([])
   })
@@ -1197,13 +1948,13 @@ test('an announcement that work overtook is dropped', async ($, on) => {
   expect(await $.prompt.submit(own as never)).toEqual({ drop: 'cache-bell: work started before the compaction was announced' })
 })
 
-test('the second period is renewed without a question, the third asks again and ends with the announcement and a compaction', async ($, on) => {
+test('the second period is renewed without a question, the third asks again and ends with the announcement and a compaction', { timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(240 * S)
   expect(seen.did).toEqual(['fork'])
 
   await clock.advance(239 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:36 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:36')
   await clock.advance(S)
   expect(seen.did).toEqual(['fork', 'fork'])
 
@@ -1243,7 +1994,7 @@ test('each answer to the real question is carried out', async ($, on) => {
   // 3 and Enter: let it expire. Nothing is sent, the band says so, and the cache goes cold in time.
   await edit($, '', 0, 0, '3')
   expect(await enter($, '3')).toEqual({ drop: 'cache-bell: Let it expire' })
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data · nothing will be done')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 1:05 · nothing will be done')
   await clock.advance(65 * S)
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expired · the next message re-sends 144k tokens uncached')
   expect(seen.did).toEqual([])
@@ -1268,7 +2019,7 @@ test('a message from the person closes the real question and starts the countdow
 
   await enter($, 'hello')
   await turn($, clock, 0)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35')
   expect(seen.did).toEqual([])
   expect(seen.toasts).toEqual([])
 })
@@ -1289,11 +2040,11 @@ test('a small context is left alone', async ($, on) => {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await clock.advance(274 * S)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:01')
   expect(seen.did).toEqual([])
 })
 
-test('a compaction that is refused leaves the cache cold', { options: { mode: 'compact-only' } }, async ($, on) => {
+test('a compaction that is refused leaves the cache cold', { options: COMPACT_ONLY }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   answers.compactSkip = true
   await clock.advance(241 * S)
@@ -1302,7 +2053,7 @@ test('a compaction that is refused leaves the cache cold', { options: { mode: 'c
 })
 
 
-test('with the limit of the manifest an hour-long cache shows its countdown from 30 minutes left', async ($, on) => {
+test('with the limit of the manifest an hour-long cache shows its countdown from 30 minutes left', { timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1315,11 +2066,12 @@ test('with the limit of the manifest an hour-long cache shows its countdown from
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 30 min')
 })
 
-test('the mark wears the brand colours in the band, whatever the tone of the line', { options: { mode: 'custom', ask: 'never', renewMethod: 'none', compact: false } }, async ($, on) => {
+test('the mark wears the brand colours in the band, whatever the tone of the line', { options: { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
+  await clock.advance(2 * S)
   const drawn = async () => {
     const ui = await $.ui.mount(abovePrompt())
     const line = await ui.find({ type: 'Text' })
@@ -1331,13 +2083,135 @@ test('the mark wears the brand colours in the band, whatever the tone of the lin
     ['⣿', '#7ad8f8', true, false],
     // the name in the plain colour, then the message in the tone of the moment
     [' Cache Bell:', undefined, true, false],
-    [' prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data', undefined, false, true],
+    [' prompt cache expires in 4:33', undefined, false, true],
   ])
-  await clock.advance(210 * S)
-  expect((await drawn())[3]).toEqual([' prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', 'yellow', false, false])
+  await clock.advance(208 * S)
+  expect((await drawn())[3]).toEqual([' prompt cache expires in 1:05', 'yellow', false, false])
   await clock.advance(65 * S)
   expect((await drawn()).map(run => run[1])).toEqual(['#3aa3b3', '#7ad8f8', undefined, 'cyan'])
 })
+
+// --- how full the context is, told to Claude after a tool result ---
+
+// A tool call of the main thread, or of a subagent: what comes back to the model beside the result.
+const toolContext = async ($: Engine, agentId?: string): Promise<readonly string[] | undefined> => {
+  const input = agentId === undefined ? { tool: 'Bash', command: 'ls' } : { tool: 'Bash', command: 'ls', agentId }
+  return ((await $.tool.call(input as never)) as { context?: readonly string[] }).context
+}
+
+test('past half the window Claude is told how full the context is, once per step, and a subagent is told nothing', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 90000
+  expect(await toolContext($)).toBeUndefined()
+  answers.tokens = 143985
+  expect(await toolContext($, 'a1')).toBeUndefined()
+  expect(await toolContext($)).toEqual(['[cache-bell] Context notice: 144k of a 200k window (72%).'])
+  expect(await toolContext($)).toBeUndefined()
+  answers.tokens = 170000
+  expect(await toolContext($)).toEqual(['[cache-bell] Context notice: 170k of a 200k window (85%).'])
+})
+
+test('past the limit the person set Claude is told they want a compaction', { options: { compactLevelK: 100, compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 99000
+  expect(await toolContext($)).toBeUndefined()
+  answers.tokens = 120000
+  expect(await toolContext($)).toEqual([
+    '[cache-bell] User preference notice: the user set a context limit of 100k; the context is now 120k of a 200k window (60%), 20k over. The user wants a compaction at the next good point: see skill cache-bell:compact.',
+  ])
+})
+
+test('with both options off, or the plugin switched off, nothing is added to a tool result', { options: { compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 195000
+  answers.usages = 0
+  expect(await toolContext($)).toBeUndefined()
+  // Nothing is even asked of Claude Code.
+  expect(answers.usages).toBe(0)
+})
+
+test('with the plugin switched off nothing is added to a tool result', { options: { enabled: false, compactLevelK: 100 } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 195000
+  expect(await toolContext($)).toBeUndefined()
+})
+
+test('a denied tool call carries no line, and a failing usage or tool leaves the call as it was', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  let tool: 'deny' | 'files' = 'deny'
+  on('tool.call', () => (tool === 'deny' ? { deny: 'not allowed' } : { result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 195000
+  const call = () => $.tool.call({ tool: 'Bash', command: 'ls' } as never) as Promise<unknown>
+  expect(await call()).toEqual({ deny: 'not allowed' })
+  tool = 'files'
+  answers.isUsageBroken = true
+  expect(await call()).toEqual({ result: 'files' })
+})
+
+test('/bell set gives this session a level of its own, none, or the option\'s again', { options: { compactLevelK: 100, compactContextNotices: false } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 120000
+  expect((await run($, 'set 150K')).text).toBe('This session is asked to compact once its context is past 150K, at a good moment. /bell set default puts the level of the options back.')
+  expect(await status($)).toMatch(/^version 0\.1\.0 · on, bellcompact\[150K, this session\]\n/)
+  expect(await toolContext($)).toBeUndefined()
+  answers.tokens = 160000
+  expect((await toolContext($))?.[0]).toMatch(/^\[cache-bell\] User preference notice: the user set a context limit of 150k; .*, 10k over\./)
+  expect((await run($, 'set off')).text).toBe('This session is not asked to compact at a size. /bell set default puts the level of the options back.')
+  expect(await status($)).toMatch(/^version 0\.1\.0 · on, bellcompact\[off, this session\]\n/)
+  answers.tokens = 170000
+  expect(await toolContext($)).toBeUndefined()
+  expect((await run($, 'set default')).text).toBe('This session compacts from the level of cache-bell.compactLevelK again: 100K.')
+  expect(await status($)).toMatch(/^version 0\.1\.0 · on, bellcompact\[100K\]\n/)
+  expect((await toolContext($))?.[0]).toMatch(/limit of 100k; .*, 70k over\./)
+  // A word it does not take changes nothing.
+  for (const word of ['0', '10001K', 'lots', '']) expect((await run($, `set ${word}`)).text).toBe('Usage: /bell set <level>K | off | default, the level 1K to 10000K')
+  expect(await status($)).toMatch(/^version 0\.1\.0 · on, bellcompact\[100K\]\n/)
+})
+
+test('/bell set counts only in the bellcompact profile', { options: { profile: 'watch' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect((await run($, 'set 150')).text).toBe('The compaction level counts only in the bellcompact profile; cache-bell.profile is watch.')
+})
+
+test('where Claude may not ask for a compaction it is told only how full the context is', { options: { compactLevelK: 100, compactOnRequest: 'off' } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  on('tool.call', () => ({ result: 'files' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  answers.tokens = 120000
+  expect((await toolContext($))?.[0]).toBe('[cache-bell] Context notice: 120k of a 200k window (60%).')
+})
+
+// The level is the session's alone: an idle session that the plugin does not compact is no reason to keep quiet.
+for (const options of [{ compactLevelK: 0 }, { compactLevelK: 0, ...KEEP }]) {
+  test(`without a level (${JSON.stringify(options)}) Claude is told only how full the context is`, { options: { compactLevelK: 100, ...options } }, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    stubs(on)
+    on('tool.call', () => ({ result: 'files' }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    answers.tokens = 120000
+    expect((await toolContext($))?.[0]).toBe('[cache-bell] Context notice: 120k of a 200k window (60%).')
+  })
+}
 
 // --- the session asks for a compaction ---
 
@@ -1419,7 +2293,7 @@ test('the person can drop what the session asked for', async ($, on) => {
   expect(await status($)).toMatch(/State: warm/)
 })
 
-test('set to auto the compaction follows the turn at once; set to off the session is refused', { options: { sessionCompact: 'auto' } }, async ($, on) => {
+test('set to auto the compaction follows the turn at once; set to off the session is refused', { options: { compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1430,7 +2304,7 @@ test('set to auto the compaction follows the turn at once; set to off the sessio
   expect(await status($)).toMatch(/State: dormant/)
 })
 
-test('set to off the session is refused and nothing happens', { options: { sessionCompact: 'off' } }, async ($, on) => {
+test('set to off the session is refused and nothing happens', { options: { compactOnRequest: 'off' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1440,7 +2314,7 @@ test('set to off the session is refused and nothing happens', { options: { sessi
   expect(await status($)).toMatch(/State: warm/)
 })
 
-test('/bell show holds the band in a look for a screenshot, and off puts the real one back', { options: { mode: 'custom', ask: 'never', renewMethod: 'none', compact: false } }, async ($, on) => {
+test('/bell show holds the band in a look for a screenshot, and off puts the real one back', { options: { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1457,16 +2331,25 @@ test('/bell show holds the band in a look for a screenshot, and off puts the rea
   await clock.advance(100 * S)
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expired · the next message re-sends 144k tokens uncached')
   expect((await run($, 'show off')).text).toBe('The band shows the real state again.')
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55 · lifetime 5m assumed, not yet seen in the data')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 2:55')
   expect((await run($, 'show nonsense')).text).toBe('Usage: /bell show calm | act | cold | intro | off')
   expect(seen.did).toEqual([])
 })
 
-test('instructions of the person\'s own go to the compaction with the time and the idle minutes filled in', { options: { mode: 'compact-only', compactInstructions: 'Idle {idle} min at {time}.' } }, async ($, on) => {
+test('instructions of the person\'s own go to the compaction with the time and the idle minutes filled in', { options: { ...COMPACT_ONLY, compactInstructions: 'Idle {idle} min at {time}.' } }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(241 * S)
   expect(seen.did.length).toBe(1)
   expect(seen.did[0]).toMatch(/^compact\[\w+\]: Idle 4 min at \d{4}-\d\d-\d\d \d\d:\d\d UTC\.$/)
+})
+
+test('after renewals and the announcement {idle} still counts from the person\'s last message', { timeoutMs: LONG, options: { compactInstructions: 'Idle {idle} min.' } }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(720 * S)
+  expect(seen.did).toEqual(['fork', 'fork', 'prepare'])
+  await ownTurn($, clock)
+  await clock.advance(S)
+  expect(seen.did[3]).toMatch(/^compact\[\w+\]: Idle 12 min\.$/)
 })
 
 // --- the plugin built on this one runs in the same session ---
@@ -1487,7 +2370,7 @@ test('with the plugin built on it already running, this one does nothing from th
   expect(seen.logs).toEqual(['standing down: the plugin built on this one runs in the session'])
 })
 
-test('when the plugin built on it starts later, this one takes its question down and stands down', async ($, on) => {
+test('when the plugin built on it starts later, this one takes its question down and stands down', { timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1522,7 +2405,7 @@ const inks = async ($: Engine) => {
   return runsOf(line).map(part => [flat(part), part.props?.color])
 }
 
-const WATCH = { mode: 'custom', ask: 'never', renewMethod: 'none', compact: false }
+const WATCH = { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' }
 
 test('on a light theme the mark and the message wear the colours for a light background', { options: WATCH }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
@@ -1531,7 +2414,7 @@ test('on a light theme the mark and the message wear the colours for a light bac
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
   await clock.advance(210 * S)
-  expect(await inks($)).toEqual([['h', '#073a44'], ['⣿', '#00697a'], [' Cache Bell:', undefined], [' prompt cache expires in 1:05 · lifetime 5m assumed, not yet seen in the data', '#8a5a00']])
+  expect(await inks($)).toEqual([['h', '#073a44'], ['⣿', '#00697a'], [' Cache Bell:', undefined], [' prompt cache expires in 1:05', '#8a5a00']])
   await clock.advance(65 * S)
   expect((await inks($))[3]?.[1]).toBe('#005f73')
 
@@ -1554,7 +2437,7 @@ test('the question swings between the ambers for a light background', async ($, 
 // --- an announcement or a compaction that does not go as planned ---
 
 // Announces and compacts at the time to act, with no question and no renewal.
-const ANNOUNCE = { mode: 'custom', ask: 'never', maxRenewals: 0, renewMethod: 'none', prepareBeforeCompact: true, compact: true }
+const ANNOUNCE = { idleAsk: 'never', idleRenewals: 0, idleAnnounce: true, idleCompact: 'on' }
 
 test('an announcement the person interrupts is not followed by a compaction', { options: ANNOUNCE }, async ($, on) => {
   const { clock, seen } = await idle($, on)
@@ -1573,7 +2456,7 @@ test('an announcement the person interrupts is not followed by a compaction', { 
   expect(await bandText($)).toMatch(/nothing will be done$/)
 })
 
-test('an announcement another plugin dropped leaves the conversation as it is', { options: ANNOUNCE }, async ($, on) => {
+test('an announcement another plugin dropped leaves the conversation as it is', { options: ANNOUNCE, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   answers.isAnnouncementDropped = true
   await clock.advance(240 * S)
@@ -1619,7 +2502,7 @@ test('a compaction waits while the person types and follows a minute after the l
   await key($)
   await clock.advance(45 * S)
   expect(seen.did).toEqual([])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:30 · lifetime 5m assumed, not yet seen in the data · compaction waits for you to finish typing')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:30 · compaction waits for you to finish typing')
   expect(await status($)).toContain('Compaction waits for you to finish typing')
 
   // 4:19, less than a minute since the last key at 3:20; a second later the minute is over.
@@ -1645,12 +2528,12 @@ test('a person who keeps typing until the cache runs out gets no compaction, and
   expect(seen.did).toEqual([])
 })
 
-test('a compaction waits for a subagent that still runs and follows once it is done', { options: ANNOUNCE }, async ($, on) => {
+test('a compaction waits for a subagent that still runs and follows once it is done', { options: ANNOUNCE, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   answers.agents = ['completed', 'running']
   await clock.advance(250 * S)
   expect(seen.did).toEqual([])
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:25 · lifetime 5m assumed, not yet seen in the data · compaction waits for a running subagent')
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 0:25 · compaction waits for a running subagent')
 
   answers.agents = ['completed', 'completed']
   await clock.advance(S)
@@ -1659,7 +2542,7 @@ test('a compaction waits for a subagent that still runs and follows once it is d
 
 // On an hour-long cache five minutes lie between the time to act (50 min) and the last safe moment. The
 // session starts a few seconds before the time to act, so the test does not tick through the hour.
-test('a key pressed while the compaction is announced holds it back, with no second announcement', { options: { ...ANNOUNCE, ttl: '1h' } }, async ($, on) => {
+test('a key pressed while the compaction is announced holds it back, with no second announcement', { options: { ...ANNOUNCE, cacheTtl: '1h' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 + 2995 * S })
   const seen = stubs(on)
   answers.stored = leftBehind({ phase: 'WARM', ttlMs: 3600 * S, ttlSource: 'config', isAsked: false })
@@ -1711,7 +2594,7 @@ test('the person who answers Compact gets it, whatever stands in the way', async
   expect(logged(seen)).toMatchObject([{ why: 'cache', by: 'person' }])
 })
 
-test('a digit that selects a choice is an answer, not typing', { options: { mode: 'custom', ask: 'first', maxRenewals: 0, renewMethod: 'none', prepareBeforeCompact: false, sessionCompact: 'auto' } }, async ($, on) => {
+test('a digit that selects a choice is an answer, not typing', { options: { idleAsk: 'first', idleRenewals: 0, idleAnnounce: false, compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1753,7 +2636,7 @@ test('a compaction that waited for typing when the plugin was loaded again waits
   expect(seen.did).toEqual(['prepare'])
 })
 
-test('what the session asked for and a subagent held back is done after the turn that brings the result', { options: { sessionCompact: 'auto' } }, async ($, on) => {
+test('what the session asked for and a subagent held back is done after the turn that brings the result', { options: { compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1774,7 +2657,7 @@ test('what the session asked for and a subagent held back is done after the turn
   expect(logged(seen)).toMatchObject([{ why: 'session', by: 'plugin', note: 'the task is done' }])
 })
 
-test('a key pressed while the question is up means the timer compacts nothing under the person', { options: { mode: 'custom', ask: 'first', maxRenewals: 0, renewMethod: 'none' } }, async ($, on) => {
+test('a key pressed while the question is up means the timer compacts nothing under the person', { options: { idleAsk: 'first', idleRenewals: 0 } }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(210 * S)
   expect((await question($)).selected).toEqual(['[1] >Compact<'])
@@ -1789,7 +2672,7 @@ test('a key pressed while the question is up means the timer compacts nothing un
   expect(await status($)).toContain('State: cold, compaction postponed')
 })
 
-test('what the session asked for waits while its subagent still runs', { options: { sessionCompact: 'auto' } }, async ($, on) => {
+test('what the session asked for waits while its subagent still runs', { options: { compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -1820,7 +2703,7 @@ test('the subagents are asked about only when a compaction could start', { optio
   expect(answers.listed).toBe(2)
 })
 
-test('a compaction that fails with an error leaves the cache cold, says so and logs nothing', { options: { mode: 'compact-only' } }, async ($, on) => {
+test('a compaction that fails with an error leaves the cache cold, says so and logs nothing', { options: COMPACT_ONLY, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   answers.isCompactBroken = true
   await clock.advance(241 * S)
@@ -1835,7 +2718,7 @@ test('a compaction that fails with an error leaves the cache cold, says so and l
   expect(seen.did.length).toBe(1)
 })
 
-test('a log that cannot be written does not stand in the way of the compaction', { options: { mode: 'compact-only' } }, async ($, on) => {
+test('a log that cannot be written does not stand in the way of the compaction', { options: COMPACT_ONLY }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   answers.isStoreBroken = true
   await clock.advance(241 * S)
@@ -1846,7 +2729,7 @@ test('a log that cannot be written does not stand in the way of the compaction',
   expect(seen.logs[0]).toMatch(/^compaction not logged: /)
 })
 
-test('the log keeps its newest 200 entries and leaves the rest of the store alone', { options: { mode: 'compact-only' } }, async ($, on) => {
+test('the log keeps its newest 200 entries and leaves the rest of the store alone', { options: COMPACT_ONLY }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   const old = Array.from({ length: 200 }, (_, at) => `log:2025-12-01T00:${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}.000Z:aaaaaaaa`)
   for (const key of old) seen.store.set(key, { why: 'manual' })
@@ -1859,7 +2742,7 @@ test('the log keeps its newest 200 entries and leaves the rest of the store alon
   expect(keys.some(key => key.startsWith('log:2026-01-12T09:04:01') && key.endsWith(':abcd1234'))).toBe(true)
 })
 
-test('in the notify mode nothing is ever sent: no renewal, no announcement, no compaction', { options: { mode: 'notify' } }, async ($, on) => {
+test('in the notify mode nothing is ever sent: no renewal, no announcement, no compaction', { options: NOTIFY, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(210 * S)
   expect((await question($)).labels).toEqual(['[1]  Compact ', '[2]  Renew cache ', '[3] >Let it expire<'])
@@ -1868,10 +2751,13 @@ test('in the notify mode nothing is ever sent: no renewal, no announcement, no c
   expect(await status($)).toContain('State: cold, expired')
 })
 
-test('set to wait, what the session asked for is done only when the person says so', { options: { sessionCompact: 'wait' } }, async ($, on) => {
+test('set to wait, what the session asked for is done only when the person says so', { options: { compactOnRequest: 'wait' }, timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // A first turn, and the transcript found by the session's id shows the five minutes.
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
   expect(await askingTurn($, clock)).toBe('Compaction requested. When this turn ends the user is asked; this request compacts the conversation only if they say so. End this turn now and call no more tools.')
   expect(await question($)).toMatchObject({
     text: 'h⣿ Cache Bell: The session asked for a compaction: No answer: Not now in 3:30',
@@ -1908,7 +2794,7 @@ test('the session may name the countdown of its request; without one the option 
   expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
 })
 
-test('a turn nobody is known to have sent does not start the count of renewals over', { options: { mode: 'keep' } }, async ($, on) => {
+test('a turn nobody is known to have sent does not start the count of renewals over', { options: KEEP, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(3 * 240 * S)
   expect(seen.did).toEqual(['fork', 'fork', 'fork'])
@@ -1926,11 +2812,12 @@ test('a turn nobody is known to have sent does not start the count of renewals o
   expect(seen.did).toEqual(['fork', 'fork', 'fork', 'fork'])
 })
 
-test('notify with a waiting session request sends nothing at all without the person', { options: { mode: 'notify', sessionCompact: 'wait' } }, async ($, on) => {
+test('notify with a waiting session request sends nothing at all without the person', { options: { ...NOTIFY, compactOnRequest: 'wait' }, timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await turn($, clock, 0)
+  await clock.advance(2 * S)
   await askingTurn($, clock)
   expect((await question($)).selected).toEqual(['[2] >Not now<'])
   // The request waits, the cache's own question comes and goes, the cache runs out: nothing was sent.
@@ -2096,6 +2983,8 @@ test('the first time on a machine the band says what the plugin does without the
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   seen.store.clear()
+  // Answered about the hour already: the notice asks nothing.
+  seen.store.set('hour', 'no')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const shown = await introDrawn($)
   expect(shown.hasButton).toBe(true)
@@ -2105,7 +2994,7 @@ test('the first time on a machine the band says what the plugin does without the
       'before the prompt cache expires it renews the prompt cache up to 2 times, then compacts the conversation',
       'Claude may ask for a compaction too: you get 30 s to cancel, or the time Claude names',
       'this notice is shown once: OK or your next message puts it away for good',
-      'change it in /config: cache-bell.mode, cache-bell.sessionCompact, cache-bell.enabled',
+      'change it in /config: cache-bell.profile, cache-bell.compactOnRequest, cache-bell.enabled',
     ].join(''),
   )
   // Not yet seen: closing the session now shows it again next time.
@@ -2114,19 +3003,22 @@ test('the first time on a machine the band says what the plugin does without the
   // The first message the person sends takes it down and it is remembered as seen.
   await enter($, 'hello')
   await turn($, clock, 0)
-  expect(seen.store.get('intro')).toBe(1)
-  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:35 · lifetime 5m assumed, not yet seen in the data')
+  expect(seen.store.get('intro')).toBe(2)
+  await clock.advance(2 * S)
+  expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 4:33')
 })
 
 test('OK takes the notice down, and a machine that has seen it is not told again', async ($, on) => {
   mock.clock(on, { now: T0 })
   const seen = stubs(on)
   seen.store.clear()
+  // Answered about the hour already: the notice asks nothing.
+  seen.store.set('hour', 'no')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const ui = await $.ui.mount(abovePrompt())
   await ui.press({ key: 'intro-ok' })
   await ui.unmount()
-  expect(seen.store.get('intro')).toBe(1)
+  expect(seen.store.get('intro')).toBe(2)
   expect(await bandText($)).toBe('drawn by Claude Code')
 
   // /bell show intro puts it up again, for a look; a question stands over it, and show off takes it down.
@@ -2145,11 +3037,13 @@ test('OK in another session takes the notice down here too, but not one put up f
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   seen.store.clear()
+  // Answered about the hour already: the notice asks nothing.
+  seen.store.set('hour', 'no')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await clock.advance(10 * S)
   expect((await introDrawn($)).hasButton).toBe(true)
   // The other session writes what this one would have written.
-  seen.store.set('intro', 1)
+  seen.store.set('intro', 2)
   await clock.advance(4 * S)
   await clock.settle()
   expect((await introDrawn($)).hasButton).toBe(false)
@@ -2163,9 +3057,11 @@ test('the real notice stays the real one under /bell show intro, and a look that
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   seen.store.clear()
+  // Answered about the hour already: the notice asks nothing.
+  seen.store.set('hour', 'no')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await run($, 'show intro')
-  seen.store.set('intro', 1)
+  seen.store.set('intro', 2)
   await clock.advance(4 * S)
   await clock.settle()
   expect((await introDrawn($)).hasButton).toBe(false)
@@ -2184,6 +3080,205 @@ test('a machine that has seen the notice starts without it', async ($, on) => {
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+// The notice with the question about the rhythm of work: what it shows, and its two buttons.
+const hourAsked = async ($: Engine) => {
+  const ui = await $.ui.mount(abovePrompt())
+  const drawn = flat(await ui.drawn())
+  const first = await ui.find({ key: 'intro-hour' })
+  const second = await ui.find({ key: 'intro-yes' })
+  await ui.unmount()
+  return { drawn, isAsked: first !== undefined || second !== undefined }
+}
+
+const press = async ($: Engine, key: string) => {
+  const ui = await $.ui.mount(abovePrompt())
+  await ui.press({ key })
+  await ui.unmount()
+}
+
+test('the first-run notice asks what the person does after a reply; "within the hour" asks for the hour at the next cold moment', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  seen.store.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const shown = await hourAsked($)
+  expect(shown.isAsked).toBe(true)
+  expect(shown.drawn).toContain('When Claude finishes a reply, what do you usually do next?')
+  expect(shown.drawn).toContain('/bell hour on|off changes it later')
+  // Nothing is set by the answer itself: the hour waits for a request on a cold cache.
+  await press($, 'intro-hour')
+  expect(seen.store.get('hour')).toBe('yes')
+  expect(seen.store.get('rhythm')).toBe('within-hour')
+  expect(seen.store.get('intro')).toBe(2)
+  expect(seen.envSet).toEqual([])
+  expect(await bandText($)).toBe('drawn by Claude Code')
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+  expect(await status($)).toMatch(/Hour-long cache: asked for, not yet confirmed by a response/)
+})
+
+test('"Reply within a few minutes" asks for no hour and is remembered as the answer', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  seen.store.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await press($, 'intro-soon')
+  expect(seen.store.get('hour')).toBe('no')
+  expect(seen.store.get('rhythm')).toBe('soon')
+  expect(seen.store.get('intro')).toBe(2)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+})
+
+test('a message instead of an answer asks for no hour and is no answer', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, NO_RESPONSE)
+  seen.store.clear()
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(seen.store.get('hour')).toBe(undefined)
+  expect(seen.store.get('intro')).toBe(2)
+  expect(seen.envSet).toEqual([])
+  expect(await status($)).not.toMatch(/Hour-long cache/)
+})
+
+test('a machine that saw the notice before it asked about the hour sees it again, unless the hour is settled otherwise', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  seen.store.set('intro', 1)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // A TTL of the person's own: nothing new to tell.
+  expect(await bandText($)).toBe('drawn by Claude Code')
+})
+
+test('a machine that ran 0.2.x is told once that Claude now compacts past the level, and how to keep the old ways', { options: { compactLevelK: 200 } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane', CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })
+  seen.store.set('intro', 1)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // The hour is settled by the person's own TTL: only the new level is told.
+  expect((await introDrawn($)).drawn).toContain('new in 0.3.4: by default, Claude now compacts by itself once the context passes 200K, after a finished piece of work, with a countdown to cancel. For warnings only, set cache-bell.profile to watch; the CHANGELOG has the details')
+  const ui = await $.ui.mount(abovePrompt())
+  await ui.press({ key: 'intro-ok' })
+  await ui.unmount()
+  expect(seen.store.get('intro')).toBe(2)
+})
+
+test('a new machine is told the level, and that /bell set changes it', { options: { compactLevelK: 200 } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  seen.store.clear()
+  seen.store.set('hour', 'no')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect((await introDrawn($)).drawn).toContain('past 200K Claude compacts the conversation itself at a good moment (/bell set changes it for this session)')
+})
+
+test('a machine that saw the notice before it asked about the hour is asked now', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  seen.store.set('intro', 1)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect((await hourAsked($)).isAsked).toBe(true)
+  // Pauses the five minutes cover, or ones the hour would not outlast either: no hour.
+  await press($, 'intro-hours')
+  expect(seen.store.get('hour')).toBe('no')
+  expect(seen.store.get('rhythm')).toBe('hours')
+  expect(seen.store.get('intro')).toBe(2)
+})
+
+test('/bell hour on asks for the hour at the next cold moment, off gives it back at once',{ options: { idleAsk: 'never', idleRenewals: 0, idleCompact: 'off' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(await run($, 'hour')).toEqual({ text: 'You did not answer yet: the hour-long cache is not asked for.' })
+  expect(await run($, 'hour maybe')).toEqual({ text: 'Usage: /bell hour [on|off]' })
+  await turn($, clock, 0)
+  await clock.advance(2 * S)
+  expect((await run($, 'hour on')).text).toBe('On: Cache Bell asks Claude Code for the hour-long cache.\nIt takes effect at the next moment the prompt cache is cold anyway, in every session on this machine.')
+  // Warm: nothing yet.
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual([])
+  await clock.advance(400 * S)
+  await turn($, clock, 0)
+  expect(seen.envSet).toEqual(HOUR_SET)
+  expect((await run($, 'hour off')).text).toBe('Off: Cache Bell does not ask for the hour-long cache.\nThe hour asked for in this session is given back now; other sessions give it back with their next request.')
+  expect(seen.envSet).toEqual([...HOUR_SET, ...HOUR_DROPPED])
+  expect(await status($)).toMatch(/Cache TTL: 5m \(assumed, not yet seen in the data\)/)
+  // Off again: nothing more to give back.
+  expect((await run($, 'hour off')).text).toBe('Off: Cache Bell does not ask for the hour-long cache.')
+})
+
+test('back within the hour after the plugin\'s own compaction, the person gets a second chance, once on a machine', { options: COMPACT_ONLY, timeoutMs: LONG }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  seen.store.set('hour', 'no')
+  await clock.advance(241 * S)
+  expect(seen.did[0]).toMatch(/^compact/)
+  // Back ten minutes later: the turn ends with the question.
+  await clock.advance(600 * S)
+  await turn($, clock, 0)
+  const shown = await hourAsked($)
+  expect(shown.isAsked).toBe(true)
+  expect(shown.drawn).toContain('you came back 10 minutes after a compaction')
+  expect(shown.drawn).toContain('Switch to the hour-long cache?')
+  await press($, 'intro-yes')
+  expect(seen.store.get('hour')).toBe('yes')
+  expect(seen.store.get('hourSecond')).toBe(1)
+  // The first-run notice stays as it was.
+  expect(seen.store.get('intro')).toBe(2)
+})
+
+test('No to the second chance is kept: after the next compaction it is not asked again', { options: COMPACT_ONLY, timeoutMs: LONG }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  seen.store.set('hour', 'no')
+  await clock.advance(241 * S)
+  await clock.advance(600 * S)
+  await turn($, clock, 0)
+  await press($, 'intro-no')
+  expect(seen.store.get('hour')).toBe('no')
+  expect(seen.store.get('hourSecond')).toBe(1)
+  expect(seen.envSet).toEqual([])
+  // Idle again, compacted again, back within the hour: no question.
+  await clock.advance(241 * S)
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(2)
+  await clock.advance(600 * S)
+  await turn($, clock, 0)
+  expect((await hourAsked($)).isAsked).toBe(false)
+})
+
+for (const [name, kept, options, ownTtl] of [
+  ['to whoever said yes', { hour: 'yes' }, {}, false],
+  ['a second time on the machine', { hourSecond: 1 }, {}, false],
+  ['where cacheRequestHour is off', { hour: 'no' }, { cacheRequestHour: 'off' }, false],
+  ['where cacheRequestHour is on', { hour: 'no' }, { cacheRequestHour: 'on' }, false],
+  ['to whoever set a TTL of their own', { hour: 'no' }, {}, true],
+] as [string, Record<string, unknown>, Record<string, unknown>, boolean][]) {
+  test(`no second chance ${name}`, { options: { ...COMPACT_ONLY, ...options }, timeoutMs: LONG }, async ($, on) => {
+    const { clock, seen } = await idle($, on)
+    for (const [key, value] of Object.entries(kept)) seen.store.set(key, value)
+    if (ownTtl) answers.settings = { promptCacheTtl: '5m' }
+    await clock.advance(241 * S)
+    expect(seen.did[0]).toMatch(/^compact/)
+    await clock.advance(600 * S)
+    await turn($, clock, 0)
+    expect((await hourAsked($)).isAsked).toBe(false)
+  })
+}
+
+test('no second chance after a compaction the session asked for: the hour would have spared none', { timeoutMs: LONG }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  seen.store.set('hour', 'no')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingWith($, clock, undefined)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(seen.did.filter(did => did.startsWith('compact')).length).toBe(1)
+  await clock.advance(600 * S)
+  await turn($, clock, 0)
+  expect((await hourAsked($)).isAsked).toBe(false)
 })
 
 // A turn in which the session asks for a compaction, with what it wants to be told after it. The turn is
@@ -2292,7 +3387,7 @@ test('three compactions in a row are followed by a note; then the person has to 
   expect(wakes(seen).length).toBe(4)
 })
 
-test('a compaction that fails, or one the person calls off, is followed by no note', { options: { compactCountdown: 30 } }, async ($, on) => {
+test('a compaction that fails, or one the person calls off, is followed by no note', { options: { compactCountdown: 30 }, timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -2340,7 +3435,7 @@ test('of two requests in one turn the note passed last counts; a digit left in t
   expect(wakes(seen).map(wake => /\n\n(.*)\n\n/.exec(wake)?.[1])).toEqual(['Second.'])
 })
 
-test('a compaction the timers bring wakes nobody, also after a request that was taken back', { options: { mode: 'compact-only' } }, async ($, on) => {
+test('a compaction the timers bring wakes nobody, also after a request that was taken back', { options: COMPACT_ONLY }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -2356,18 +3451,18 @@ test('a compaction the timers bring wakes nobody, also after a request that was 
 })
 
 // The manifest lists the words: Claude Code hands the plugin the default in place of any other, and says so itself.
-test('an option set to a word it does not take reads as the default', { options: { mode: 'kep', ttl: '10m' } }, async ($, on) => {
+test('an option set to a word it does not take reads as the default', { options: { profile: 'kep', cacheTtl: '10m' } }, async ($, on) => {
   mock.clock(on, { now: T0 })
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const report = await status($)
-  expect(report).toContain('mode prepare-compact')
+  expect(report).toContain('on, bellcompact[off]')
   // Where the manifest lists the words an option takes, Claude Code hands over the default and there is
   // nothing to say. Where it lists none (the form for a place that takes no such lists), the word comes
   // through and the report names it.
   if (report.includes('is set to')) {
-    expect(report).toContain('mode is set to "kep", which is not one of notify, keep, prepare-compact, compact-only, custom; the default, prepare-compact, is used')
-    expect(report).toContain('ttl is set to "10m", which is not one of auto, 5m, 1h')
+    expect(report).toContain('profile is set to "kep", which is not one of off, watch, bellcompact; the default, bellcompact, is used')
+    expect(report).toContain('cacheTtl is set to "10m", which is not one of auto, settings, 5m, 1h; the default, auto, is used')
   }
 })
 
@@ -2406,3 +3501,22 @@ for (const [passed, sent] of [[{ resumeWith: 'New.', then: 'Old.' }, 'New.'], [{
     expect(wakes(seen)[0]).toContain(`\n\n${sent}\n\n`)
   })
 }
+
+test('the report says on which surfaces the band was asked for and drawn, and which came and went', async ($, on) => {
+  on('session.attach', async (_, e) => ({ clientId: e.clientId }))
+  on('session.detach', async (_, e) => ({ clientId: e.clientId }))
+  mock.clock(on, { now: T0 })
+  stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const before = (await run($, 'report')).text ?? ''
+  const count = (text: string, row: string, surface: string): number => Number(new RegExp(`${row}: [^·]*${surface} (\\d+)`).exec(text)?.[1] ?? 0)
+  await run($, 'demo 30')
+  await question($, 'desktop')
+  await $.session.attach({ surface: 'mobile', clientId: 'phone-of-jane' })
+  await $.session.detach({ surface: 'mobile', clientId: 'phone-of-jane', reason: 'detached' })
+  const after = (await run($, 'report')).text ?? ''
+  expect(count(after, 'band asked for', 'desktop')).toBe(count(before, 'band asked for', 'desktop') + 1)
+  expect(count(after, 'drawn', 'desktop')).toBe(count(before, 'drawn', 'desktop') + 1)
+  expect(after).toMatch(/seen: [^·]*mobile attached, mobile left$/m)
+  expect(after).not.toContain('jane')
+})

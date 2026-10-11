@@ -87,15 +87,21 @@ const isSet = (value: string | undefined): boolean => value !== undefined && val
 const isOn = (value: string | undefined): boolean => isSet(value) && !['0', 'false', 'no', 'off'].includes((value ?? '').toLowerCase())
 const ago = (now: number, at: number | null): string => (at === null ? 'never' : `${formatLeft(now - at)} ago`)
 
+// A surface that came or went, as Claude Code named it: shown only in the allowed form.
+export type SurfaceChange = { surface: string; change: 'attached' | 'left' }
+
 export type ReportFacts = {
   version: string | undefined
   isWindows: boolean
   surface: string | undefined
+  // the surfaces the session draws on now (null = could not be read), how often each asked for the band and
+  // got one since the plugin was loaded, and the surfaces that came and went
+  surfaces: { now: readonly string[] | null; asked: Record<string, number>; drawn: Record<string, number>; changes: readonly SurfaceChange[] | null }
   // the model of the last request this instance of the plugin saw
   model: string | undefined
-  // environment variables, as read: undefined = not set
-  env: { bedrock?: string; vertex?: string; foundry?: string; baseUrl?: string; noCaching?: string; force5m?: string; ttl?: string }
-  // what the settings and the environment ask for, in milliseconds; null = nothing
+  // environment variables, as read: undefined = not set; isTtlOwn: the TTL is the one Cache Bell set itself
+  env: { bedrock?: string; vertex?: string; foundry?: string; baseUrl?: string; noCaching?: string; force5m?: string; ttl?: string; isTtlOwn?: boolean }
+  // what the person's settings and environment ask for, in milliseconds; null = nothing
   askedTtlMs: number | null
   contextTokens: number | undefined
   transcript: { isKnown: boolean; isById: boolean; exists: boolean | null; size: number | null; readAt: number | null; failed: number; rereadAt: number | null }
@@ -115,6 +121,18 @@ export const problemReport = (state: State, now: number, config: Config, facts: 
   const rows: string[] = [REPORT_HEAD]
   const where = [`Cache Bell ${facts.version ?? 'version unknown'}`, `Claude Code ${tail?.version ?? 'version not seen'}`, facts.isWindows ? 'Windows' : 'not Windows', facts.surface ?? 'surface unknown']
   rows.push(where.join(' · '))
+  const kind = (surface: string): string => shown(surface, WORD) ?? HIDDEN
+  const counts = (by: Record<string, number>): string =>
+    Object.keys(by).length === 0 ? 'none' : Object.entries(by).map(([surface, n]) => `${kind(surface)} ${n}`).join(', ')
+  const { surfaces } = facts
+  rows.push(
+    [
+      `Surfaces: ${surfaces.now === null ? 'not read' : surfaces.now.length === 0 ? 'none' : surfaces.now.map(kind).join(', ')}`,
+      `band asked for: ${counts(surfaces.asked)}`,
+      `drawn: ${counts(surfaces.drawn)}`,
+      `seen: ${surfaces.changes === null ? 'not watched' : surfaces.changes.length === 0 ? 'nothing' : surfaces.changes.map(seen => `${kind(seen.surface)} ${seen.change === 'attached' ? 'attached' : 'left'}`).join(', ')}`,
+    ].join(' · '),
+  )
   const { env } = facts
   // The request's model first; one that may not be shown gives way to the transcript's.
   const asked = shown(facts.model, MODEL)
@@ -123,30 +141,31 @@ export const problemReport = (state: State, now: number, config: Config, facts: 
     `Model: ${model} · Bedrock ${yesNo(isOn(env.bedrock))} · Vertex ${yesNo(isOn(env.vertex))} · Foundry ${yesNo(isOn(env.foundry))} · own API address ${yesNo(isSet(env.baseUrl))}`,
   )
   rows.push(
-    `Cache settings: DISABLE_PROMPT_CACHING ${yesNo(isOn(env.noCaching))} · FORCE_PROMPT_CACHING_5M ${yesNo(isOn(env.force5m))} · CLAUDE_CODE_PROMPT_CACHE_TTL ${shown(env.ttl, WORD) ?? 'not set'} · TTL asked for ${facts.askedTtlMs === null ? 'none' : formatTtl(facts.askedTtlMs)}`,
+    `Cache settings: DISABLE_PROMPT_CACHING ${yesNo(isOn(env.noCaching))} · FORCE_PROMPT_CACHING_5M ${yesNo(isOn(env.force5m))} · CLAUDE_CODE_PROMPT_CACHE_TTL ${shown(env.ttl, WORD) ?? 'not set'}${env.isTtlOwn === true ? ' (set by Cache Bell)' : ''} · TTL asked for ${facts.askedTtlMs === null ? 'none' : formatTtl(facts.askedTtlMs)}`,
   )
   const changed = [
-    config.preparePrompt === DEFAULT_PREPARE_PROMPT ? '' : 'preparePrompt',
-    config.pingPrompt === DEFAULT_PING_PROMPT ? '' : 'pingPrompt',
+    config.preparePrompt === DEFAULT_PREPARE_PROMPT ? '' : 'idleAnnouncePrompt',
+    config.pingPrompt === DEFAULT_PING_PROMPT ? '' : 'idleRenewPrompt',
     config.compactInstructions === DEFAULT_COMPACT_INSTRUCTIONS ? '' : 'compactInstructions',
   ].filter(name => name !== '')
   rows.push(
     [
       `Options: enabled ${config.enabled}`,
-      `mode ${config.mode}`,
-      `ask ${config.ask}`,
-      `maxRenewals ${config.maxRenewals}`,
-      `renewMethod ${config.renewMethod}`,
-      `prepareBeforeCompact ${config.prepareBeforeCompact}`,
-      `compact ${config.compact}`,
-      `ttl ${config.ttlMs === null ? 'auto' : formatTtl(config.ttlMs)}`,
-      `minContextTokens ${config.minContextTokens}`,
+      `profile ${config.profile}`,
+      `compactLevelK ${config.compactAtTokens / 1000}`,
+      `compactContextNotices ${config.contextNotices}`,
+      `compactOnRequest ${config.sessionCompact}`,
       `compactCountdown ${config.compactCountdownMs / 1000}`,
-      `askLeadMinutes ${config.askLeadMs / MINUTE_MS}`,
-      `sessionCompact ${config.sessionCompact}`,
+      `idleMinContextK ${config.minContextTokens / 1000}`,
+      `idleAsk ${config.ask}`,
+      `idleAskAheadMinutes ${config.askLeadMs / MINUTE_MS}`,
+      `idleRenewals ${config.maxRenewals}`,
+      `idleCompact ${config.compact ? (config.compactHourOnly ? 'auto' : 'on') : 'off'}`,
+      `idleAnnounce ${config.prepareBeforeCompact}`,
+      `cacheTtl ${config.ttlMs !== null ? formatTtl(config.ttlMs) : config.readTranscript ? 'auto' : 'settings'}`,
+      `cacheRequestHour ${config.requestHour}`,
       `display ${config.display}`,
-      `showBelowMinutes ${config.showBelowMs / MINUTE_MS}`,
-      `readTranscript ${config.readTranscript}`,
+      `displayBelowMinutes ${config.showBelowMs / MINUTE_MS}`,
       `texts changed: ${changed.length === 0 ? 'none' : changed.join(', ')}`,
     ].join(' · '),
   )

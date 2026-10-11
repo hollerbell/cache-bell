@@ -4,7 +4,7 @@
 // the load.
 
 import { MINUTE_MS, parseTtl } from './timing'
-import type { Config, Mode } from './types'
+import type { Config, Profile } from './types'
 
 // What the session is told before a compaction the plugin starts on its own: only that it is coming. What
 // to keep is the summary's own business.
@@ -17,73 +17,76 @@ export const DEFAULT_PING_PROMPT = 'This request only keeps the prompt cache war
 // sets instructions of their own.
 export const DEFAULT_COMPACT_INSTRUCTIONS = ''
 
-export const DEFAULT_MODE: Mode = 'prepare-compact'
+export const DEFAULT_PROFILE: Profile = 'bellcompact'
 
 type Options = Readonly<Record<string, unknown>>
 
-// Every option with the default plugin.json gives it. A test holds this table to
-// what the configuration resolves to with no options set.
+// Every option with the default plugin.json gives it. A test holds this table to what the configuration
+// resolves to with no options set. `mode` is 0.2.x's and has no default: only a value somebody set comes in.
 export type OptionValue = boolean | string | number
 export const OPTION_DEFAULTS: Readonly<Record<string, OptionValue>> = {
   enabled: true,
-  mode: DEFAULT_MODE,
-  ask: 'first',
-  maxRenewals: 2,
-  renewMethod: 'fork',
-  prepareBeforeCompact: true,
-  compact: true,
-  preparePrompt: DEFAULT_PREPARE_PROMPT,
-  pingPrompt: DEFAULT_PING_PROMPT,
-  compactInstructions: DEFAULT_COMPACT_INSTRUCTIONS,
-  ttl: 'auto',
-  minContextTokens: 100000,
+  profile: DEFAULT_PROFILE,
+  compactLevelK: 200,
+  compactContextNotices: true,
+  compactOnRequest: 'confirm',
   compactCountdown: 30,
-  sessionCompact: 'confirm',
-  askLeadMinutes: 0,
-  display: 'band',
-  showBelowMinutes: 30,
-  readTranscript: true,
+  compactInstructions: DEFAULT_COMPACT_INSTRUCTIONS,
+  idleMinContextK: 80,
+  idleAsk: 'first',
+  idleAskAheadMinutes: 0,
+  idleRenewals: 2,
+  idleRenewPrompt: DEFAULT_PING_PROMPT,
+  idleCompact: 'auto',
+  idleAnnounce: true,
+  idleAnnouncePrompt: DEFAULT_PREPARE_PROMPT,
+  cacheTtl: 'auto',
+  cacheRequestHour: 'ask',
+  display: 'status',
+  displayBelowMinutes: 15,
 }
 
-type Behaviour = Pick<Config, 'ask' | 'maxRenewals' | 'maxRenewalsAsked' | 'renewMethod' | 'prepareBeforeCompact' | 'compact'>
-
-// The most renewals of one idle period, in every mode: each renewal reads the whole context on the person's
-// plan, and a session left open for a week must not do that for a week. Fixed here, not an option.
+// The most renewals of one idle period, in every profile: each renewal reads the whole context on the
+// person's plan, and a session left open for a week must not do that for a week. Fixed here, not an option.
 export const RENEWALS_CAP = 3
-const NO_LIMIT = -1
 
-export const PRESETS: Record<Exclude<Mode, 'custom'>, Behaviour> = {
-  notify: { ask: 'first', maxRenewals: 0, maxRenewalsAsked: null, renewMethod: 'none', prepareBeforeCompact: false, compact: false },
-  keep: { ask: 'never', maxRenewals: RENEWALS_CAP, maxRenewalsAsked: null, renewMethod: 'fork', prepareBeforeCompact: false, compact: false },
-  'prepare-compact': { ask: 'first', maxRenewals: 2, maxRenewalsAsked: null, renewMethod: 'fork', prepareBeforeCompact: true, compact: true },
-  'compact-only': { ask: 'never', maxRenewals: 0, maxRenewalsAsked: null, renewMethod: 'none', prepareBeforeCompact: false, compact: true },
-}
-
-// The options that take one of a few words, with those words. The manifest lists the same words, so /config
-// offers them to pick from and Claude Code hands over the default in place of any other word.
+// The options that take one of a few words, with those words. The manifest of the main build lists the same
+// words, so /config offers them to pick from; the directory's build has no lists, and a word that is none of
+// them gets the default here.
 export const WORDS = {
-  mode: ['notify', 'keep', 'prepare-compact', 'compact-only', 'custom'],
-  ask: ['first', 'every', 'never'],
-  renewMethod: ['fork', 'none'],
-  ttl: ['auto', '5m', '1h'],
-  sessionCompact: ['confirm', 'wait', 'auto', 'off'],
+  profile: ['off', 'watch', 'bellcompact'],
+  compactOnRequest: ['confirm', 'wait', 'auto', 'off'],
+  idleAsk: ['first', 'every', 'never'],
+  idleCompact: ['auto', 'on', 'off'],
+  cacheTtl: ['auto', 'settings', '5m', '1h'],
+  cacheRequestHour: ['ask', 'on', 'off'],
   display: ['band', 'status', 'both', 'off'],
 } as const
 
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   allowed.includes(value as T) ? (value as T) : fallback
 
-// The options only the custom mode reads: under a preset their value, right or wrong, decides nothing.
-const CUSTOM_ONLY: readonly string[] = ['ask', 'renewMethod']
-
 // What /bell status says of each such option that is set to something else: the default is used instead.
-// Only a Claude Code that does not check the manifest's lists lets such a word through to here.
-// An option that is not set at all is not a mistake, and neither is one the mode in use does not read.
+// An option that is not set at all is not a mistake.
 export const unknownWords = (options: Options): string[] =>
   Object.entries(WORDS)
-    .filter(([name]) => !CUSTOM_ONLY.includes(name) || oneOf<Mode>(options.mode, WORDS.mode, DEFAULT_MODE) === 'custom')
     .filter(([name, allowed]) => options[name] !== undefined && !(allowed as readonly unknown[]).includes(options[name]))
-    .map(([name, allowed]) => `${name} is set to ${JSON.stringify(options[name])}, which is not one of ${allowed.join(', ')}; the default, ${String(OPTION_DEFAULTS[name])}, is used`)
+    .map(([name, allowed]) => `${name} is set to ${JSON.stringify(options[name])}, which is not one of ${allowed.join(', ')}; the default, ${String(OPTION_DEFAULTS[name] ?? 'none')}, is used`)
+
+// What 0.2.x's mode stands for now, for an option the person set before profiles came. A value of the new
+// options set by the person wins over it. Its custom mode stands for nothing: the options it read are gone.
+type Legacy = { profile: Profile; compactLevelK?: number; idleAsk?: 'never'; idleCompact?: 'on' | 'off'; idleRenewals?: number; idleAnnounce?: boolean }
+const FROM_MODE: Record<'notify' | 'keep' | 'prepare-compact' | 'compact-only', Legacy> = {
+  notify: { profile: 'watch' },
+  keep: { profile: 'bellcompact', compactLevelK: 0, idleAsk: 'never', idleCompact: 'off', idleRenewals: RENEWALS_CAP },
+  'prepare-compact': { profile: 'bellcompact' },
+  'compact-only': { profile: 'bellcompact', idleAsk: 'never', idleCompact: 'on', idleRenewals: 0, idleAnnounce: false },
+}
+const legacyOf = (mode: unknown): Partial<Legacy> =>
+  typeof mode === 'string' && Object.hasOwn(FROM_MODE, mode) ? FROM_MODE[mode as keyof typeof FROM_MODE] : {}
+
+// What the profile leaves of the options: watch sends nothing and tells the session nothing.
+const WATCH: Partial<Config> = { ask: 'never', maxRenewals: 0, maxRenewalsAsked: null, prepareBeforeCompact: false, compact: false, compactHourOnly: false, compactAtTokens: 0, contextNotices: false, sessionCompact: 'off' }
 
 const bool = (value: unknown, fallback: boolean): boolean => (typeof value === 'boolean' ? value : fallback)
 
@@ -97,36 +100,42 @@ export const whole = (value: unknown, low: number, high: number, fallback: numbe
 // and remembered, so the status report can say what was done with it.
 const renewals = (value: unknown): Pick<Config, 'maxRenewals' | 'maxRenewalsAsked'> => {
   if (typeof value !== 'number' || !Number.isInteger(value)) return { maxRenewals: 2, maxRenewalsAsked: null }
-  // -1 used to mean no limit: whoever set it wanted the most there is, not an immediate compaction.
-  const held = value === NO_LIMIT ? RENEWALS_CAP : Math.min(Math.max(value, 0), RENEWALS_CAP)
+  const held = Math.min(Math.max(value, 0), RENEWALS_CAP)
   return { maxRenewals: held, maxRenewalsAsked: held === value ? null : value }
 }
 
-export const resolveConfig = (options: Options): Config => {
-  const mode = oneOf<Mode>(options.mode, WORDS.mode, DEFAULT_MODE)
-  const custom: Behaviour = {
-    ask: oneOf(options.ask, WORDS.ask, 'first'),
-    ...renewals(options.maxRenewals),
-    renewMethod: oneOf(options.renewMethod, WORDS.renewMethod, 'fork'),
-    prepareBeforeCompact: bool(options.prepareBeforeCompact, true),
-    compact: bool(options.compact, true),
-  }
-  const behaviour = mode === 'custom' ? custom : PRESETS[mode]
+// An option's value, or what 0.2.x's mode stands for where the option still holds its default: Claude Code
+// fills in defaults, so a value the person set to the default cannot be told from one never set.
+const orLegacy = <T,>(value: T, fallback: T, legacy: T | undefined): T => (value === fallback && legacy !== undefined ? legacy : value)
 
-  return {
-    enabled: bool(options.enabled, true),
-    mode,
-    ...behaviour,
-    preparePrompt: text(options.preparePrompt, DEFAULT_PREPARE_PROMPT),
-    pingPrompt: text(options.pingPrompt, DEFAULT_PING_PROMPT),
+export const resolveConfig = (options: Options): Config => {
+  const legacy = legacyOf(options.mode)
+  const profile = orLegacy(oneOf<Profile>(options.profile, WORDS.profile, DEFAULT_PROFILE), DEFAULT_PROFILE, legacy.profile)
+  const idleCompact = orLegacy(oneOf(options.idleCompact, WORDS.idleCompact, 'auto'), 'auto', legacy.idleCompact)
+  const settings: Config = {
+    // Switched off, the plugin is off whatever the profile.
+    enabled: bool(options.enabled, true) && profile !== 'off',
+    profile,
+    ask: orLegacy(oneOf(options.idleAsk, WORDS.idleAsk, 'first'), 'first', legacy.idleAsk),
+    ...renewals(orLegacy(Number.isInteger(options.idleRenewals) ? options.idleRenewals : 2, 2, legacy.idleRenewals)),
+    prepareBeforeCompact: orLegacy(bool(options.idleAnnounce, true), true, legacy.idleAnnounce),
+    compact: idleCompact !== 'off',
+    compactHourOnly: idleCompact === 'auto',
+    preparePrompt: text(options.idleAnnouncePrompt, DEFAULT_PREPARE_PROMPT),
+    pingPrompt: text(options.idleRenewPrompt, DEFAULT_PING_PROMPT),
     compactInstructions: text(options.compactInstructions, DEFAULT_COMPACT_INSTRUCTIONS),
-    ttlMs: parseTtl(options.ttl),
-    minContextTokens: whole(options.minContextTokens, 0, 10_000_000, 100000),
+    ttlMs: parseTtl(options.cacheTtl),
+    minContextTokens: whole(options.idleMinContextK, 0, 10_000, 80) * 1000,
+    compactAtTokens: orLegacy(whole(options.compactLevelK, 0, 10_000, 200), 200, legacy.compactLevelK) * 1000,
+    contextNotices: bool(options.compactContextNotices, true),
     compactCountdownMs: whole(options.compactCountdown, 5, 3600, 30) * 1000,
-    askLeadMs: whole(options.askLeadMinutes, 0, 600, 0) * MINUTE_MS,
-    sessionCompact: oneOf(options.sessionCompact, WORDS.sessionCompact, 'confirm'),
-    display: oneOf(options.display, WORDS.display, 'band'),
-    showBelowMs: whole(options.showBelowMinutes, 0, 600, 30) * MINUTE_MS,
-    readTranscript: bool(options.readTranscript, true),
+    askLeadMs: whole(options.idleAskAheadMinutes, 0, 600, 0) * MINUTE_MS,
+    sessionCompact: oneOf(options.compactOnRequest, WORDS.compactOnRequest, 'confirm'),
+    display: oneOf(options.display, WORDS.display, 'status'),
+    showBelowMs: whole(options.displayBelowMinutes, 0, 600, 15) * MINUTE_MS,
+    // settings: the transcript is never read, nor looked for
+    readTranscript: options.cacheTtl !== 'settings',
+    requestHour: oneOf(options.cacheRequestHour, WORDS.cacheRequestHour, 'ask'),
   }
+  return profile === 'watch' ? { ...settings, ...WATCH } : settings
 }

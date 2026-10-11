@@ -1,10 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
-import { resolveConfig } from '../../core/config'
 import { ASK_GRACE_MS, CALLED_OFF, LATE_MARGIN_MS, RENEW_FAILED, RESUMED_MIN_MS, RETRY_AFTER_MS, TOO_SOON, WORK_GRACE_MS, canRenew, decide, defaultChoice, initialState, planOf } from '../../core/decide'
 import { countdownOf, fillInstructions, isCacheHit } from '../../core/guards'
-import { TTL_1H } from '../../core/timing'
+import { TTL_1H, deadlines } from '../../core/timing'
 import type { Action, Config, Observation, State } from '../../core/types'
+import { COMPACT_ONLY, KEEP, NOTIFY, configOf } from './options'
 
 const S = 1000
 // A Monday morning: 2026-01-12 09:00 UTC.
@@ -15,10 +15,10 @@ const ACT = T0 + 240 * S
 const MAX = T0 + 275 * S
 
 const tick: Observation = { kind: 'tick', gapMs: S }
-const base = resolveConfig({})
+const base = configOf({})
 
 const state = (over: Partial<State> = {}): State => ({ ...initialState(base), ...over })
-const warm = (over: Partial<State> = {}): State => state({ phase: 'WARM', anchorAt: T0, contextTokens: 100000, ...over })
+const warm = (over: Partial<State> = {}): State => state({ phase: 'WARM', anchorAt: T0, ttlSource: 'transcript', contextTokens: 100000, ...over })
 const kinds = (actions: Action[]): string[] => actions.map(action => action.kind)
 
 const run = (from: State, steps: [number, Observation][], config: Config = base): State =>
@@ -30,25 +30,23 @@ test('what is done without an answer follows the mode and the renewals already u
     [{}, 0, true, 'renew'],
     [{}, 1, true, 'renew'],
     [{}, 2, false, 'compact'],
-    [{ mode: 'notify' }, 0, false, 'cancel'],
+    [NOTIFY, 0, false, 'cancel'],
     // keep renews up to the cap and then lets the cache expire: it never compacts
-    [{ mode: 'keep' }, 2, true, 'renew'],
-    [{ mode: 'keep' }, 3, false, 'cancel'],
+    [KEEP, 2, true, 'renew'],
+    [KEEP, 3, false, 'cancel'],
     // the cap holds whatever a custom setting asks for
-    [{ mode: 'custom', maxRenewals: 1000 }, 2, true, 'renew'],
-    [{ mode: 'custom', maxRenewals: 1000 }, 3, false, 'compact'],
-    // what used to mean no limit now means the cap
-    [{ mode: 'custom', maxRenewals: -1 }, 2, true, 'renew'],
-    [{ mode: 'custom', maxRenewals: -1 }, 3, false, 'compact'],
-    [{ mode: 'custom', maxRenewals: 3, compact: false }, 3, false, 'cancel'],
-    [{ mode: 'compact-only' }, 0, false, 'compact'],
-    [{ mode: 'custom', maxRenewals: 0, compact: false }, 0, false, 'cancel'],
-    [{ mode: 'custom', maxRenewals: 1 }, 0, true, 'renew'],
-    [{ mode: 'custom', maxRenewals: 1 }, 1, false, 'compact'],
-    [{ mode: 'custom', maxRenewals: 5, renewMethod: 'none' }, 0, false, 'compact'],
+    [{ idleRenewals: 1000 }, 2, true, 'renew'],
+    [{ idleRenewals: 1000 }, 3, false, 'compact'],
+    // a negative number means none
+    [{ idleRenewals: -1 }, 0, false, 'compact'],
+    [{ idleRenewals: 3, idleCompact: 'off' }, 3, false, 'cancel'],
+    [COMPACT_ONLY, 0, false, 'compact'],
+    [{ idleRenewals: 0, idleCompact: 'off' }, 0, false, 'cancel'],
+    [{ idleRenewals: 1 }, 0, true, 'renew'],
+    [{ idleRenewals: 1 }, 1, false, 'compact'],
   ]
   for (const [options, renewals, may, choice] of table) {
-    const config = resolveConfig(options)
+    const config = configOf(options)
     const at = warm({ renewals })
     expect({ options, renewals, may: canRenew(at, config), choice: defaultChoice(at, config) }).toEqual({ options, renewals, may, choice })
   }
@@ -70,13 +68,13 @@ test('each answer does what it says', () => {
   const table: [string, Record<string, unknown>, string, Partial<State>, string[]][] = [
     ['renew', {}, 'renew', { phase: 'RENEWING', askReason: null, askDeadline: null }, ['close-question', 'renew', 'redraw']],
     ['compact after an announcement', {}, 'compact', { phase: 'PREPARING' }, ['close-question', 'prepare', 'redraw']],
-    ['compact without one', { mode: 'compact-only' }, 'compact', { phase: 'COMPACTING' }, ['close-question', 'compact', 'redraw']],
-    ['compact with an empty announcement', { preparePrompt: '' }, 'compact', { phase: 'COMPACTING' }, ['close-question', 'compact', 'redraw']],
+    ['compact without one', COMPACT_ONLY, 'compact', { phase: 'COMPACTING' }, ['close-question', 'compact', 'redraw']],
+    ['compact with an empty announcement', { idleAnnouncePrompt: '' }, 'compact', { phase: 'COMPACTING' }, ['close-question', 'compact', 'redraw']],
     ['let it expire', {}, 'cancel', { phase: 'WARM', isDeclined: true }, ['close-question', 'redraw']],
-    ['renew is done even when the mode would not renew by itself', { mode: 'notify' }, 'renew', { phase: 'RENEWING' }, ['close-question', 'renew', 'redraw']],
+    ['renew is done even when the mode would not renew by itself', NOTIFY, 'renew', { phase: 'RENEWING' }, ['close-question', 'renew', 'redraw']],
   ]
   for (const [name, options, choice, fields, actions] of table) {
-    const result = decide(asking, ASK + S, { kind: 'answer', choice } as Observation, resolveConfig(options))
+    const result = decide(asking, ASK + S, { kind: 'answer', choice } as Observation, configOf(options))
     const got = Object.fromEntries(Object.keys(fields).map(key => [key, result.state[key as keyof State]]))
     expect({ name, state: got, actions: kinds(result.actions) }).toEqual({ name, state: fields, actions })
   }
@@ -118,7 +116,7 @@ test('with ask set to first, the second period is acted on without a question', 
   expect(kinds(acted.actions)).toEqual(['renew', 'redraw'])
 
   // With ask set to every, it is asked again.
-  const every = resolveConfig({ mode: 'custom', ask: 'every' })
+  const every = configOf({ idleAsk: 'every' })
   expect(decide(second, ACT + 210 * S, tick, every).state.phase).toBe('ASKING')
 })
 
@@ -174,29 +172,29 @@ test('work that starts while the plugin asks or acts takes over', () => {
 
 test('nothing is done after the person declined, for a small context, or when switched off', () => {
   expect(decide(warm({ isDeclined: true }), ACT, tick, base)).toMatchObject({ state: { phase: 'WARM' }, actions: [{ kind: 'redraw' }] })
-  expect(decide(warm({ contextTokens: 99999 }), ACT, tick, base)).toMatchObject({ state: { phase: 'WARM' }, actions: [{ kind: 'redraw' }] })
+  expect(decide(warm({ contextTokens: 79999 }), ACT, tick, base)).toMatchObject({ state: { phase: 'WARM' }, actions: [{ kind: 'redraw' }] })
   // At the threshold itself, and with the size unknown, the plugin acts.
-  expect(decide(warm({ contextTokens: 100000 }), ASK, tick, base).state.phase).toBe('ASKING')
+  expect(decide(warm({ contextTokens: 80000 }), ASK, tick, base).state.phase).toBe('ASKING')
   expect(decide(warm({ contextTokens: null }), ASK, tick, base).state.phase).toBe('ASKING')
-  const off = decide(warm(), ACT, tick, resolveConfig({ enabled: false }))
+  const off = decide(warm(), ACT, tick, configOf({ enabled: false }))
   expect(off).toMatchObject({ state: { phase: 'WARM', isAsked: false }, actions: [] })
 })
 
 test('modes that do not ask act at the time to act', () => {
   const table: [Record<string, unknown>, number, string, string[]][] = [
-    [{ mode: 'keep' }, ASK, 'WARM', ['redraw']],
-    [{ mode: 'keep' }, ACT, 'RENEWING', ['renew', 'redraw']],
-    [{ mode: 'compact-only' }, ASK, 'WARM', ['redraw']],
-    [{ mode: 'compact-only' }, ACT, 'COMPACTING', ['compact', 'redraw']],
+    [KEEP, ASK, 'WARM', ['redraw']],
+    [KEEP, ACT, 'RENEWING', ['renew', 'redraw']],
+    [COMPACT_ONLY, ASK, 'WARM', ['redraw']],
+    [COMPACT_ONLY, ACT, 'COMPACTING', ['compact', 'redraw']],
   ]
   for (const [options, now, phase, actions] of table) {
-    const result = decide(warm(), now, tick, resolveConfig(options))
+    const result = decide(warm(), now, tick, configOf(options))
     expect({ options, at: now - T0, phase: result.state.phase, actions: kinds(result.actions) }).toEqual({ options, at: now - T0, phase, actions })
   }
 })
 
 test('the notify mode asks, and without an answer leaves the cache to expire', () => {
-  const notify = resolveConfig({ mode: 'notify' })
+  const notify = configOf(NOTIFY)
   const asked = decide(warm(), ASK, tick, notify)
   expect(asked.actions[0]).toEqual({ kind: 'ask', reason: 'cache', deadline: ACT, selected: 'cancel' })
   const left = decide(asked.state, ACT, { kind: 'answer', choice: 'cancel' }, notify)
@@ -258,7 +256,7 @@ test('the compaction instructions get the time and the idle minutes', () => {
 })
 
 test('the cache question can be set to come earlier', () => {
-  const early = resolveConfig({ askLeadMinutes: 2 })
+  const early = configOf({ idleAskAheadMinutes: 2 })
   expect(decide(warm(), T0 + 120 * S - 1, tick, early).state.phase).toBe('WARM')
   expect(decide(warm(), T0 + 120 * S, tick, early).actions[0]).toEqual({ kind: 'ask', reason: 'cache', deadline: ACT, selected: 'renew' })
   // On an hour-long cache the question comes a quarter of an hour before the time to act.
@@ -269,7 +267,7 @@ test('the cache question can be set to come earlier', () => {
 
 // --- the second reason to compact: the session asked for it ---
 
-const working = (over: Partial<State> = {}): State => state({ phase: 'BUSY', anchorAt: T0, ...over })
+const working = (over: Partial<State> = {}): State => state({ phase: 'BUSY', anchorAt: T0, ttlSource: 'transcript', ...over })
 const done = (tokens: number | undefined): Observation => ({ kind: 'turn-complete', contextTokens: tokens })
 
 const asks: Observation = { kind: 'requested' }
@@ -288,13 +286,13 @@ test('a request is noted only while a turn runs, and taken up when that turn end
 
 test('what a request leads to follows the setting', () => {
   const table: [Record<string, unknown>, string, string[]][] = [
-    [{ sessionCompact: 'confirm' }, 'ASKING', ['ask', 'redraw']],
-    [{ sessionCompact: 'auto' }, 'COMPACTING', ['compact', 'redraw']],
-    [{ sessionCompact: 'off' }, 'WARM', ['redraw']],
-    [{ sessionCompact: 'auto', enabled: false }, 'WARM', []],
+    [{ compactOnRequest: 'confirm' }, 'ASKING', ['ask', 'redraw']],
+    [{ compactOnRequest: 'auto' }, 'COMPACTING', ['compact', 'redraw']],
+    [{ compactOnRequest: 'off' }, 'WARM', ['redraw']],
+    [{ compactOnRequest: 'auto', enabled: false }, 'WARM', []],
   ]
   for (const [options, phase, actions] of table) {
-    const result = decide(working({ isRequested: true }), T0 + 5 * S, done(60000), resolveConfig(options))
+    const result = decide(working({ isRequested: true }), T0 + 5 * S, done(60000), configOf(options))
     expect({ options, phase: result.state.phase, actions: kinds(result.actions), isRequested: result.state.isRequested }).toEqual({ options, phase, actions, isRequested: false })
   }
 })
@@ -392,11 +390,11 @@ test('the countdown of a question the session asked for ends while the cache is 
     ['a short turn: the whole countdown', {}, T0 + 10 * S, T0 + 40 * S],
     ['a long turn: cut to the last safe moment', { compactCountdown: 180 }, T0 + 120 * S, MAX - LATE_MARGIN_MS],
     ['a countdown longer than the cache lives', { compactCountdown: 600 }, T0 + 10 * S, MAX - LATE_MARGIN_MS],
-    ['an hour-long cache leaves the countdown whole', { ttl: '1h', compactCountdown: 180 }, T0 + 120 * S, T0 + 300 * S],
+    ['an hour-long cache leaves the countdown whole', { cacheTtl: '1h', compactCountdown: 180 }, T0 + 120 * S, T0 + 300 * S],
   ]
   for (const [name, options, endsAt, deadline] of table) {
-    const config = resolveConfig(options)
-    const asked = turn(state({ ttlMs: config.ttlMs ?? base.ttlMs ?? 300 * S }), T0, endsAt, {}, config, true)
+    const config = configOf(options)
+    const asked = turn(state({ ttlMs: config.ttlMs ?? base.ttlMs ?? 300 * S, ttlSource: 'transcript' }), T0, endsAt, {}, config, true)
     expect({ name, phase: asked.state.phase, deadline: asked.state.askDeadline }).toEqual({ name, phase: 'ASKING', deadline })
     expect(asked.actions[0]).toEqual({ kind: 'ask', reason: 'session', deadline, selected: 'compact' })
     // Nobody answers: the compaction runs, it is not dropped because the cache ran out first.
@@ -404,21 +402,21 @@ test('the countdown of a question the session asked for ends while the cache is 
   }
   // With too little time left to decide in, the person is not asked and nothing is compacted behind their back.
   for (const endsAt of [MAX - 2 * LATE_MARGIN_MS + S, MAX - S]) {
-    const late = turn(state(), T0, endsAt, {}, base, true)
+    const late = turn(state({ ttlSource: 'transcript' }), T0, endsAt, {}, base, true)
     expect({ endsAt, phase: late.state.phase, actions: late.actions }).toEqual({ endsAt, phase: 'WARM', actions: [{ kind: 'notify', text: TOO_SOON }, { kind: 'redraw' }] })
   }
   // A session that may compact without asking still does: the cache is warm.
-  expect(turn(state(), T0, MAX - S, {}, resolveConfig({ sessionCompact: 'auto' }), true).state.phase).toBe('COMPACTING')
+  expect(turn(state({ ttlSource: 'transcript' }), T0, MAX - S, {}, configOf({ compactOnRequest: 'auto' }), true).state.phase).toBe('COMPACTING')
 })
 
 test('a turn the person interrupted takes the request for a compaction with it', () => {
   for (const sessionCompact of ['auto', 'confirm']) {
-    const config = resolveConfig({ sessionCompact })
+    const config = configOf({ compactOnRequest: sessionCompact })
     const ended = turn(state(), T0, T0 + 10 * S, { isAborted: true }, config, true)
     expect({ sessionCompact, phase: ended.state.phase, actions: kinds(ended.actions) }).toEqual({ sessionCompact, phase: 'WARM', actions: ['redraw'] })
   }
   // A turn that ended with its answer keeps it.
-  expect(turn(state(), T0, T0 + 10 * S, {}, resolveConfig({ sessionCompact: 'auto' }), true).state.phase).toBe('COMPACTING')
+  expect(turn(state(), T0, T0 + 10 * S, {}, configOf({ compactOnRequest: 'auto' }), true).state.phase).toBe('COMPACTING')
 })
 
 test('a turn whose last request ended in an error falls back to what the cache is known to have seen', () => {
@@ -461,8 +459,8 @@ test('a renewal that got no answer is tried once more, a little later, and then 
   expect(twice.actions).toEqual([{ kind: 'notify', text: RENEW_FAILED }, { kind: 'redraw' }])
   expect(run(twice.state, [[sentAt + 2 * S, tick], [MAX - S, tick]]).phase).toBe('WARM')
   // The same in every mode, whatever the number of renewals.
-  for (const options of [{ mode: 'keep' }, { mode: 'custom', maxRenewals: 1000 }, { mode: 'custom', ask: 'every' }]) {
-    const config = resolveConfig(options)
+  for (const options of [KEEP, { idleRenewals: 1000 }, { idleAsk: 'every' }]) {
+    const config = configOf(options)
     const once = decide(renewing, failedAt, { kind: 'renew-failed' }, config)
     expect({ options, retryAt: once.state.retryAt }).toEqual({ options, retryAt: failedAt + RETRY_AFTER_MS })
     expect(decide(once.state, failedAt + S, tick, config).state.phase).toBe('WARM')
@@ -488,7 +486,7 @@ test('a clock that was set back is not taken for a warm cache', () => {
 
 test('switched off with a question open, the question is dropped and nothing is done', () => {
   const asking = warm({ phase: 'ASKING', isAsked: true, askReason: 'cache', askDeadline: ACT })
-  const off = resolveConfig({ enabled: false })
+  const off = configOf({ enabled: false })
   const after = decide(asking, ACT + ASK_GRACE_MS, tick, off)
   expect(after.state).toMatchObject({ phase: 'WARM', askReason: null, askDeadline: null })
   expect(after.actions).toEqual([])
@@ -503,34 +501,46 @@ test('the plan says whether the plugin will ask and whether it will act', () => 
     ['asked once already, a renewal comes next', {}, { isAsked: true, renewals: 1 }, false, true],
     // a compaction is asked about again, however often the question was up before
     ['asked once already, the compaction comes next', {}, { isAsked: true, renewals: 2 }, true, true],
-    ['a mode that never asks does not ask before its compaction either', { mode: 'compact-only' }, {}, false, true],
-    ['keep, its renewals used up', { mode: 'keep' }, { renewals: 3 }, false, false],
-    ['asking every time', { mode: 'custom', ask: 'every' }, { isAsked: true }, true, true],
-    ['keep never asks', { mode: 'keep' }, {}, false, true],
-    ['notify only asks', { mode: 'notify' }, {}, true, false],
-    ['notify, asked already', { mode: 'notify' }, { isAsked: true }, false, false],
+    ['a mode that never asks does not ask before its compaction either', COMPACT_ONLY, {}, false, true],
+    ['keep, its renewals used up', KEEP, { renewals: 3 }, false, false],
+    ['asking every time', { idleAsk: 'every' }, { isAsked: true }, true, true],
+    ['keep never asks', KEEP, {}, false, true],
+    ['notify only asks', NOTIFY, {}, true, false],
+    ['notify, asked already', NOTIFY, { isAsked: true }, false, false],
     ['the person declined', {}, { isDeclined: true }, false, false],
-    ['a small context', {}, { contextTokens: 99999 }, false, false],
+    ['a small context', {}, { contextTokens: 79999 }, false, false],
     ['a context of unknown size', {}, { contextTokens: null }, true, true],
     ['switched off', { enabled: false }, {}, false, false],
+    // idleCompact auto: an idle session compacts only while its cache lives an hour
+    ['auto, five minutes, renewals left', { idleCompact: 'auto' }, {}, true, true],
+    ['auto, five minutes, renewals used up', { idleCompact: 'auto' }, { isAsked: true, renewals: 2 }, false, false],
+    ['auto, an hour, renewals used up', { idleCompact: 'auto' }, { isAsked: true, renewals: 2, ttlMs: TTL_1H }, true, true],
+    ['auto, no renewals, five minutes', { idleCompact: 'auto', idleRenewals: 0 }, {}, true, false],
   ]
   for (const [name, options, over, asks, acts] of table) {
-    expect({ name, ...planOf(warm(over), resolveConfig(options)) }).toEqual({ name, asks, acts })
+    expect({ name, ...planOf(warm(over), configOf(options)) }).toEqual({ name, asks, acts })
   }
+})
+
+test('set to auto, the timers compact an idle session on an hour-long cache and let a five-minute one expire', () => {
+  const auto = configOf({ idleCompact: 'auto', idleAsk: 'never', idleRenewals: 0, idleAnnounce: false })
+  expect(decide(warm(), ACT, { kind: 'tick', gapMs: S }, auto).state.phase).toBe('WARM')
+  const hour = warm({ ttlMs: TTL_1H })
+  expect(decide(hour, deadlines(T0, TTL_1H).tAct, { kind: 'tick', gapMs: S }, auto).state.phase).toBe('COMPACTING')
 })
 
 test('no mode renews more than three times in one idle period, and only the person at work starts the count over', () => {
   const table: [Record<string, unknown>, number][] = [
     // options, renewals in twenty idle periods on end
     [{}, 2],
-    [{ mode: 'keep' }, 3],
-    [{ mode: 'custom', maxRenewals: 3, ask: 'never' }, 3],
-    [{ mode: 'custom', maxRenewals: 99, ask: 'never' }, 3],
-    [{ mode: 'custom', maxRenewals: -1, ask: 'never' }, 3],
-    [{ mode: 'compact-only' }, 0],
+    [KEEP, 3],
+    [{ idleRenewals: 3, idleAsk: 'never' }, 3],
+    [{ idleRenewals: 99, idleAsk: 'never' }, 3],
+    [{ idleRenewals: -1, idleAsk: 'never' }, 0],
+    [COMPACT_ONLY, 0],
   ]
   for (const [options, most] of table) {
-    const config = resolveConfig(options)
+    const config = configOf(options)
     let current = warm()
     let renewed = 0
     // Each tick at the time to act, each renewal answered with a hit.
@@ -587,7 +597,7 @@ test('a session may name the countdown of its request, within bounds', () => {
 })
 
 test('set to wait, a request is asked about and only the person compacts', () => {
-  const wait = resolveConfig({ sessionCompact: 'wait' })
+  const wait = configOf({ compactOnRequest: 'wait' })
   const requested = decide(working(), T0 + S, { kind: 'requested', countdownMs: 60 * S }, wait).state
   const asked = decide(requested, T0 + 5 * S, done(150000), wait)
   // No countdown of the request's own: the question stays until the cache's course takes over, here with
@@ -605,13 +615,13 @@ test('set to wait, a request is asked about and only the person compacts', () =>
 
   // A mode whose next step is the compaction: the waiting question does not push the cache's question out,
   // so nothing is compacted without having been asked about.
-  const straight = resolveConfig({ mode: 'custom', ask: 'first', maxRenewals: 0, renewMethod: 'none', sessionCompact: 'wait' })
+  const straight = configOf({ idleAsk: 'first', idleRenewals: 0, compactOnRequest: 'wait' })
   const open = decide(requested, T0 + 5 * S, done(150000), straight).state
   expect(open.askDeadline).toBe(ASK)
   const dropped = decide(open, ASK, { kind: 'answer', choice: 'skip', isTimers: true }, straight).state
   expect(decide(dropped, ASK + S, tick, straight)).toMatchObject({ state: { phase: 'ASKING', askReason: 'cache' }, actions: [{ kind: 'ask', selected: 'compact' }, { kind: 'redraw' }] })
   // A mode that never asks: the waiting question stays until the time to act.
-  const silent = resolveConfig({ mode: 'keep', sessionCompact: 'wait' })
+  const silent = configOf({ ...KEEP, compactOnRequest: 'wait' })
   expect(decide(requested, T0 + 5 * S, done(150000), silent).state.askDeadline).toBe(ACT)
 
   // The cache turned out to live five minutes, not an hour: the question gives way at the new time to act.
@@ -633,7 +643,7 @@ test('set to wait, a request is asked about and only the person compacts', () =>
 })
 
 test('no more than three renewal requests go out in one idle period, answered or not', () => {
-  const keep = resolveConfig({ mode: 'keep' })
+  const keep = configOf(KEEP)
   // Each step: the time to act comes, a renewal goes out, and it is answered with a hit or not at all.
   const period = (from: State, isAnswered: boolean): State => {
     const at = (from.retryAt ?? (from.anchorAt ?? T0) + 240 * S) + S
@@ -693,7 +703,7 @@ test('a turn the person did not start interrupts a question about the session\'s
   const carried = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, base).state
   expect(decide(carried, T0 + 20 * S, { kind: 'turn-complete', isAborted: true }, base).state).toMatchObject({ phase: 'WARM', isRequested: false })
   // Set to wait, the question comes back too, and still only the person compacts.
-  const wait = resolveConfig({ sessionCompact: 'wait' })
+  const wait = configOf({ compactOnRequest: 'wait' })
   const waiting = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, wait).state
   const waited = decide(run(waiting, [[T0 + 16 * S, { kind: 'request', sentAt: T0 + 16 * S }]], wait), T0 + 25 * S, done(150000), wait)
   expect(waited.actions[0]).toMatchObject({ kind: 'ask', reason: 'session', selected: 'skip' })

@@ -7,8 +7,9 @@ export type Phase = 'UNKNOWN' | 'BUSY' | 'WARM' | 'ASKING' | 'RENEWING' | 'PREPA
 
 export type RestPhase = 'UNKNOWN' | 'WARM' | 'COLD' | 'DORMANT'
 
-// Where the TTL in the state came from, strongest first.
-export type TtlSource = 'config' | 'transcript' | 'model-switch' | 'settings' | 'default'
+// Where the TTL in the state came from, strongest first. 'requested': the plugin itself asked Claude Code for
+// it (cacheRequestHour), and only the transcript says whether the API granted it.
+export type TtlSource = 'config' | 'transcript' | 'requested' | 'model-switch' | 'settings' | 'default'
 
 // Why the question is asked: the cache is about to expire, the session itself asked for a compaction, or a
 // reason an extension added (core/extension.ts).
@@ -65,8 +66,13 @@ export type State = {
   // When the person last sent a message of their own: how long the session has been idle counts from here.
   workedAt: number | null
   // The plugin's own compaction, for the line the band shows until the next turn: the sizes in tokens and
-  // how long the session had been idle. null = none since the last turn.
-  lastCompaction: { before: number | null; after: number | null; idleMs: number | null } | null
+  // how long the session had been idle, and when it was done (left out by versions before 0.3.2). isIdleShort:
+  // an idle session's compaction on a cache shorter than the hour, one the hour-long cache would have spared
+  // (left out before 0.3.3). null = none since the last turn.
+  lastCompaction: { before: number | null; after: number | null; idleMs: number | null; at?: number; isIdleShort?: boolean } | null
+  // The compaction level set for this session with /bell set, in tokens; 0 = none. Left out or null = the
+  // compactLevelK option's (versions before 0.3.3 leave it out).
+  levelTokens?: number | null
 }
 
 declare module 'claude-code' {

@@ -1,6 +1,6 @@
 ---
 name: compact
-description: Compact this conversation at a good moment, with the plugin's compact tool. Use when the user asks to compact once the current work is done, or when a whole piece of work has just been finished and the context is large.
+description: Compact this conversation at a good moment, with the plugin's compact tool. Use when the user asks to compact once the current work is done, or when a whole piece of work has just been finished and the context is large. Also when a [cache-bell] User preference notice says the user wants a compaction.
 ---
 
 # Compacting at a good moment
@@ -16,11 +16,13 @@ compacted while you are still working.
   countdown ends, unless they cancel.
 - The user asked for it ("compact when you are done", "wrap up and compact"): call the tool when the work
   is done, with `userAsked: true`. They have decided already, so the countdown is three seconds.
+- A line "[cache-bell] User preference notice" means the user set a context limit of their own and the context is past it: they want a compaction at the next good point. Finish the piece of work you are on, then call the tool; do not break off a step for it. Leave out `userAsked`: the limit is a standing choice, not a request for this moment. If you do not call the tool, the plugin asks the user after the turn.
 - The user's own rules come first, in either direction. "Compact after every finished task" gives you more
   freedom; "only suggest it" means you say in one sentence that this would be a good moment, and call the
   tool once they agree.
 - Never in the middle of work, while a background task or a subagent is running, or right before the user
   is likely to follow up on details that a summary would lose.
+- A line "[cache-bell] Context notice" only tells you how full the context is. It asks for nothing; let it help you judge when a piece of work is a good place to stop.
 
 ## How
 

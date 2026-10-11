@@ -54,6 +54,19 @@ const isAnswer = (row: Json): boolean => {
   return tokens(usage.input_tokens) + tokens(usage.output_tokens) + tokens(usage.cache_read_input_tokens) + tokens(usage.cache_creation_input_tokens) > 0
 }
 
+// Whether the transcript holds a response of the main thread at all, one that failed included: a
+// conversation without one has sent nothing a cache could still hold.
+export const hasResponse = (text: string): boolean =>
+  text.split('\n').some(line => {
+    let row: unknown
+    try {
+      row = JSON.parse(line)
+    } catch {
+      return false
+    }
+    return isObject(row) && row.type === 'assistant' && row.isSidechain !== true
+  })
+
 // A row of the person's side that started no request: a command and its output, a row Claude Code adds
 // for itself.
 const isAside = (row: Json): boolean => {
@@ -116,10 +129,15 @@ export const isSamePath = (one: string, other: string): boolean => spelled(one) 
 // line, or of a character: that line does not parse and is skipped. On Windows the path goes into the
 // command text itself, quoted: PowerShell's -Command hands no further arguments to the command. The file is
 // opened shared, so Claude Code can go on writing to it.
-export const tailCommand = (path: string, bytes: number, isWindows: boolean): string[] =>
+// PowerShell is named by its full path under `systemRoot` (the variable SystemRoot): Claude Code may not find
+// it by name, where the PATH it was started with lacks its folder. Without SystemRoot, by name.
+export const powershellOf = (systemRoot: string | undefined): string =>
+  systemRoot === undefined || systemRoot.trim() === '' ? 'powershell' : `${systemRoot.replace(/[\\/]+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+
+export const tailCommand = (path: string, bytes: number, isWindows: boolean, systemRoot?: string): string[] =>
   isWindows
     ? [
-        'powershell',
+        powershellOf(systemRoot),
         '-NoProfile',
         '-NonInteractive',
         '-Command',

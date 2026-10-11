@@ -34,8 +34,9 @@ test('each cause reads as a few words', () => {
     [entry({ why: 'session', by: 'person' }), 'the session asked, you chose'],
     [entry({ why: 'manual', by: 'person' }), '/compact'],
     [entry({ why: 'auto', by: 'claude-code' }), 'the context was full, Claude Code on its own'],
-    // A reason an extension added is shown by its name.
-    [entry({ why: 'size', by: 'person' }), 'size, you chose'],
+    [entry({ why: 'size', by: 'person' }), 'the context reached your limit, you chose'],
+    // A reason another extension added is shown by its name.
+    [entry({ why: 'tasks', by: 'person' }), 'tasks, you chose'],
   ]
   for (const [cause, text] of table) expect({ cause, text: causeText(cause) }).toEqual({ cause, text })
 })

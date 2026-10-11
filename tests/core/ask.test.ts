@@ -2,11 +2,12 @@ import { expect, test } from 'claude-code/testing'
 
 import { NONE } from '../../core/extension'
 import { initialState } from '../../core/decide'
-import { resolveConfig } from '../../core/config'
 import { CHOICES, CHOICES_OF, FRAME_MS, SWING_MS, askView, chosenNotice, choiceLabel, choiceOfDigit, digitOf, dropReason, mixColor, questionParts, reloadNotice, requestAnswer, swing, wakeOf, wakePrompt, whyText, WAKE_MAX_CHARS } from '../../core/ask'
 import type { OwnChoice } from '../../core/ask'
+import { COMPACT_ONLY, KEEP, configOf } from './options'
+import { TTL_1H, TTL_5M } from '../../core/timing'
 
-const state = initialState(resolveConfig({}))
+const state = initialState(configOf({}))
 
 const S = 1000
 
@@ -91,16 +92,16 @@ test('a draft names a choice only when it is exactly its digit, among the choice
 })
 
 test('the first line names who asks and why; the last says when the selected choice is done, and that Enter does it', () => {
-  const soon = whyText('cache', state, NONE, resolveConfig({}))
+  const soon = whyText('cache', state, NONE, configOf({}))
   expect(soon).toBe('cache expires soon, 2 automatic renewals left, then compacts')
   expect(questionParts(false, soon, CHOICES.renew)).toEqual({ title: 'h⣿ Cache Bell:', head: ' Cache expires soon, 2 automatic renewals left, then compacts:', foot: 'No answer: Renew cache in ' })
   expect(questionParts(true, soon, CHOICES.compact).foot).toBe('[Enter] confirms · no answer: Compact in ')
   // A reason with no words still makes a line.
   expect(questionParts(false, '', CHOICES.compact).head).toBe(' :')
   // What is at stake stands right after the reason, once the size of the context is known.
-  expect(whyText('cache', { ...state, contextTokens: 143985 }, NONE, resolveConfig({}))).toBe('cache expires soon (144k tokens), 2 automatic renewals left, then compacts')
-  expect(whyText('cache', { ...state, contextTokens: 143985 }, NONE, resolveConfig({ mode: 'compact-only' }))).toBe('cache expires soon (144k tokens)')
-  expect(whyText('session', { ...state, contextTokens: 143985 }, NONE, resolveConfig({}))).toBe('the session asked for a compaction')
+  expect(whyText('cache', { ...state, contextTokens: 143985 }, NONE, configOf({}))).toBe('cache expires soon (144k tokens), 2 automatic renewals left, then compacts')
+  expect(whyText('cache', { ...state, contextTokens: 143985 }, NONE, configOf(COMPACT_ONLY))).toBe('cache expires soon (144k tokens)')
+  expect(whyText('session', { ...state, contextTokens: 143985 }, NONE, configOf({}))).toBe('the session asked for a compaction')
 })
 
 test('the cache question says how many renewals the plugin would still do on its own', () => {
@@ -111,14 +112,20 @@ test('the cache question says how many renewals the plugin would still do on its
     [{}, 2, 'cache expires soon, no automatic renewals left'],
     [{}, 5, 'cache expires soon, no automatic renewals left'],
     // A mode that does not renew, and no renewals at all: nothing to count.
-    [{ mode: 'keep' }, 1, 'cache expires soon, 2 automatic renewals left, then expires'],
-    [{ mode: 'keep' }, 3, 'cache expires soon, no automatic renewals left'],
-    [{ mode: 'compact-only' }, 0, 'cache expires soon'],
-    [{ mode: 'custom', renewMethod: 'none', maxRenewals: 2 }, 0, 'cache expires soon'],
+    [KEEP, 1, 'cache expires soon, 2 automatic renewals left, then expires'],
+    [KEEP, 3, 'cache expires soon, no automatic renewals left'],
+    [COMPACT_ONLY, 0, 'cache expires soon'],
+    [{ idleRenewals: 0 }, 0, 'cache expires soon'],
   ]
   for (const [options, renewals, why] of table) {
-    expect({ options, renewals, why: whyText('cache', { ...state, renewals }, NONE, resolveConfig(options)) }).toEqual({ options, renewals, why })
+    expect({ options, renewals, why: whyText('cache', { ...state, renewals }, NONE, configOf(options)) }).toEqual({ options, renewals, why })
   }
+})
+
+test('with idleCompact auto the cache question says the course ends in a compaction only on the hour-long cache', () => {
+  const auto = configOf({ idleCompact: 'auto' })
+  expect(whyText('cache', { ...state, ttlMs: TTL_5M }, NONE, auto)).toBe('cache expires soon, 2 automatic renewals left, then expires')
+  expect(whyText('cache', { ...state, ttlMs: TTL_1H }, NONE, auto)).toBe('cache expires soon, 2 automatic renewals left, then compacts')
 })
 
 test('a choice is drawn with its digit, the selected one between arrows, both the same width', () => {
@@ -162,7 +169,7 @@ test('the line Claude Code writes after a reload loses its list of hooks', () =>
 })
 
 test('the answer to a session that asks for a compaction says what will happen and what to do', () => {
-  expect(whyText('session', state, NONE, resolveConfig({}))).toBe('the session asked for a compaction')
+  expect(whyText('session', state, NONE, configOf({}))).toBe('the session asked for a compaction')
   expect(questionParts(false, 'the session asked for a compaction', CHOICES.compact).head).toBe(' The session asked for a compaction:')
   const confirm = requestAnswer("confirm", true, 30000)
   expect(confirm).toMatch(/^Compaction requested\. When this turn ends the user is asked and has up to 30 seconds to cancel; without an answer the conversation is compacted\. End this turn now and call no more tools\.$/)

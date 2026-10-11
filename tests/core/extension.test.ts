@@ -1,19 +1,19 @@
 import { expect, test } from 'claude-code/testing'
 
 import { choiceTexts, choicesOf, whyText } from '../../core/ask'
-import { resolveConfig } from '../../core/config'
 import { ASK_GRACE_MS, decide, initialState } from '../../core/decide'
 import { NONE } from '../../core/extension'
 import type { Extension } from '../../core/extension'
 import type { Action, Observation, State } from '../../core/types'
 import { statusReport } from '../../core/view'
+import { configOf } from './options'
 
 const S = 1000
 // A Monday morning: 2026-01-12 09:00 UTC.
 const T0 = Date.UTC(2026, 0, 12, 9)
 
 const tick: Observation = { kind: 'tick', gapMs: S }
-const base = resolveConfig({})
+const base = configOf({})
 
 // An extension with one question: asked once the context has ten tokens, answered by waiting.
 const toy: Extension = {
@@ -42,7 +42,7 @@ test('an extension asks its own question when a turn ends and the core has nothi
 
   expect(decide(working(), T0 + 5 * S, done(9), base, toy).state.phase).toBe('WARM')
   expect(decide(working(), T0 + 5 * S, done(20), base).state.phase).toBe('WARM')
-  expect(decide(working(), T0 + 5 * S, done(20), resolveConfig({ enabled: false }), toy).state.phase).toBe('WARM')
+  expect(decide(working(), T0 + 5 * S, done(20), configOf({ enabled: false }), toy).state.phase).toBe('WARM')
   // The session's own request comes first.
   expect(decide(working({ isRequested: true }), T0 + 5 * S, done(20), base, toy).state.askReason).toBe('session')
   // A reason the extension names but does not describe is not asked.

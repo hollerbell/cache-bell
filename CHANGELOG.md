@@ -2,6 +2,74 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.4
+
+This version renames and regroups the options of 0.2.x (see "Options of 0.2.13" below). If you ran 0.2.13 with its default options, Claude now compacts the conversation by itself once the context passes 200K, at a good moment, without asking you first. With the default settings you still get a 30-second countdown to cancel: while you type it waits, and sending a message cancels it. To keep 0.2.13's behaviour, set `compactLevelK` to 0, `idleCompact` to `on` and `idleMinContextK` to 100, and set up the display as described under "Countdown in the status line" below. To keep only the warnings, set `profile` to `watch`.
+
+- **Profiles.** A new option, `profile`, says what the plugin does:
+  - `off`: nothing.
+  - `watch`: it shows how long the prompt cache lasts and how full the context is, and does nothing on its own.
+  - `bellcompact` (the default): Claude is told how full the context is. Once the context passes a level you choose (`compactLevelK`, 200K by default), Claude compacts the conversation at a good moment, after a finished piece of work. While the session is idle, the plugin renews the cache as before; whether it then compacts depends on the cache lifetime (see below).
+
+  `/bell` shows the profile at the top, for example `bellcompact[200K]`, with one sentence on what will happen.
+- **`/bell set 300K`** gives the current session a level of its own. `/bell set off` turns off compaction by size for that session, and `/bell set default` goes back to the level from the options. Nothing is written to your settings.
+- **No more size question.** Until now, past the limit the plugin asked: Compact, Later or Not in this session. Now Claude is told and compacts at a good moment. `/bell set off` turns this off for one session.
+- **Idle compaction only on an hour-long cache.** The new option `idleCompact` is `auto` by default: the plugin compacts an idle session before the cache expires only while the cache lives an hour. On a five-minute cache it lets the cache expire. People often come back within the hour, and a compaction would then cost more than it saves. `on` always compacts an idle session, and `off` never does.
+- **The hour-long cache, on request.** The first-run notice asks what you usually do after Claude replies. If you answer that you come back within the hour, the plugin asks Claude Code for the hour-long cache:
+  - It does so the next time the cache is cold anyway, so nothing is written twice.
+  - It sets `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` in the environment of this Claude Code process, not in your shell or your settings. Processes that Claude Code starts inherit it, with one exception: shell commands that Claude runs with its Bash or PowerShell tool in the main conversation while no subagent is running. A subagent's shell commands keep it, and so do the main conversation's while a subagent is running, because requests may go out in the meantime. A `claude -p` that inherits it drops it as it starts.
+  - `/bell hour on|off` changes your answer later. The option `cacheRequestHour` (`ask`, `on`, `off`) sets it for good.
+  - On the API, writing to an hour-long cache costs twice the base input price, against 1.25 times for a five-minute one; reading costs the same for both. How this counts toward Pro, Max or Team limits is not published. It pays off when you often come back after more than five minutes but within the hour.
+  - A TTL you set yourself is never touched. `cacheTtl` only tells the plugin which TTL to assume. Set to `5m`, it also stops the plugin from asking for the hour-long cache.
+  - After `/bell hour off`, the next request no longer asks for the hour. With `enabled` = off or `profile` = `off` the plugin never asks for it, and removes a value it set earlier as soon as it loads with that setting. If you disable or uninstall the plugin in Claude Code instead, the variable stays set until Claude Code ends.
+  - With `profile` = `watch`, the plugin asks for the hour only if you chose it yourself: in the first-run notice, with `/bell hour on`, or with `cacheRequestHour` = `on`.
+
+  `/bell status` says whether the hour was asked for and whether the API granted it.
+- **Countdown in the status line.** `display` is now `status` by default (it was `band`). The countdown appears 15 minutes before the cache expires (it was 30). Questions are still shown above the prompt. To keep the old look, set `display` to `band` and `displayBelowMinutes` to 30.
+- **Cache lifetime.** The new option `cacheTtl` has four values:
+  - `auto`: read from the transcript, as before;
+  - `settings`: the transcript is never read. The lifetime is then only a guess, so the plugin does nothing on its own while the session is idle. To have it act, choose `5m` or `1h` instead;
+  - `5m` or `1h`: set by hand.
+
+  The plugin asks, renews and compacts only when it knows the lifetime. Until now it could renew an hour-long cache needlessly.
+- `minContextTokens` is now `idleMinContextK`. Its default is 80, meaning 80 000 tokens (it was 100 000 tokens in 0.2.13).
+- Once the context is half full, Claude gets a one-line note on its size after tool results (`compactContextNotices`, on by default). You don't see it, and it sends no extra request.
+
+### Options of 0.2.13
+
+Taken over:
+- `enabled` stays as it is. `false` turns the plugin off whatever the profile.
+- `mode` still applies as long as `profile` and the other new options are left at their defaults:
+  - `notify` → `watch`;
+  - `keep` → `bellcompact` with `compactLevelK` 0, `idleCompact` `off`, `idleAsk` `never` and `idleRenewals` 3;
+  - `prepare-compact` → `bellcompact`;
+  - `compact-only` → `bellcompact` with `idleCompact` `on` and `idleAsk` `never`, without renewals or announcement;
+  - `custom` → the defaults.
+- `compactCountdown`, `compactInstructions` and `display` keep their names and values.
+
+Not taken over. Set these again under their new names:
+
+| 0.2.13 | 0.3.4 |
+|---|---|
+| `minContextTokens` (tokens) | `idleMinContextK` (thousands) |
+| `sessionCompact` | `compactOnRequest` |
+| `askLeadMinutes` | `idleAskAheadMinutes` |
+| `showBelowMinutes` | `displayBelowMinutes` |
+| `preparePrompt` | `idleAnnouncePrompt` |
+| `pingPrompt` | `idleRenewPrompt` |
+| `ask` (custom) | `idleAsk` |
+| `maxRenewals` (custom) | `idleRenewals` |
+| `prepareBeforeCompact` (custom) | `idleAnnounce` |
+| `compact` (custom) | `idleCompact` |
+| `renewMethod` | removed; set `idleRenewals` to 0 for no renewals |
+| `readTranscript` | removed; use `cacheTtl` `settings` |
+| `ttl` | `cacheTtl`; for the hour-long cache itself, see `cacheRequestHour` |
+| `compactAtK` (0 = off) | `compactLevelK` (200 by default) |
+
+## 0.3.0–0.3.3
+
+Internal versions, never released. Their changes are in 0.3.4.
+
 ## 0.2.13
 
 - Where Claude Code's own events (session start, end of turn) do not reach the plugin, nothing told it

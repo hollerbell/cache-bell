@@ -1,6 +1,6 @@
 {
   "name": "cache-bell",
-  "description": "Cache Bell: keeps a long Claude Code session from re-sending its whole context after a break",
+  "description": "Cache Bell: a cache & context manager for Claude Code",
   "owner": {
     "name": "FEO digital agency s.r.o."
   },
@@ -8,7 +8,7 @@
     {
       "name": "cache-bell",
       "source": "./",
-      "description": "Keeps a long Claude Code session from re-sending its whole context after a break. Before the prompt cache expires it asks, then renews the cache or compacts the conversation."
+      "description": "Cache & context manager for Claude Code. Claude can compact when it's done with a piece of work, and you get time to cancel. Before the prompt cache expires, it asks, then renews the cache or compacts while it's still warm."
     }
   ]
 }

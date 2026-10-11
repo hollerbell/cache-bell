@@ -80,6 +80,7 @@ const WHY: Readonly<Record<string, string>> = {
   session: 'the session asked',
   manual: '/compact',
   auto: 'the context was full',
+  size: 'the context reached your limit',
 }
 
 const BY: Readonly<Record<string, string>> = {

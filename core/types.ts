@@ -34,14 +34,19 @@ export type Observation =
   | { kind: 'requested'; countdownMs?: number | null }
   // the session takes back what it asked for earlier
   | { kind: 'withdrawn' }
+  // /bell set: the compaction level of this session, in tokens; 0 = none, null = the option's again
+  | { kind: 'level'; levelTokens: number | null }
   // the shell could not carry out a step (the announcement did not get through)
   | { kind: 'refused'; reason: string }
-  | { kind: 'ttl'; ttlMs: number; source: 'transcript' | 'settings' }
+  // requested: the plugin set the hour in Claude Code's environment, before a request; default: it took the
+  // hour back and nothing else asks for a TTL
+  | { kind: 'ttl'; ttlMs: number; source: 'transcript' | 'settings' | 'requested' | 'default' }
   // the transcript could not be read, or was read and names no TTL
   | { kind: 'ttl-unread'; isUnread: boolean }
   | { kind: 'model-switch'; ttlMs: number | null }
-  // own: the plugin ran it itself, with the sizes before and after in tokens
-  | { kind: 'compacted'; own?: { before: number | null; after: number | null } }
+  // own: the plugin ran it itself, with the sizes before and after in tokens, and isIdle when it ran before an
+  // idle session's cache expired; tokensAfter: the size after another's compaction, where Claude Code said it
+  | { kind: 'compacted'; own?: { before: number | null; after: number | null; isIdle?: boolean }; tokensAfter?: number | null }
   | { kind: 'cleared' }
   // the session was resumed from its transcript in a new process: when its last request went out, as the
   // transcript or Claude Code says, and the size of the context then
@@ -61,24 +66,32 @@ export type Action =
 
 export type Decision = { state: State; actions: Action[] }
 
-export type Mode = 'notify' | 'keep' | 'prepare-compact' | 'compact-only' | 'custom'
+// off: nothing; watch: the countdown and the size, nothing sent and nothing said to the session; bellcompact:
+// the session compacts from its level on, and the plugin keeps the cache of an idle session (the idle options)
+export type Profile = 'off' | 'watch' | 'bellcompact'
 
 export type Config = {
   enabled: boolean
-  mode: Mode
+  profile: Profile
   ask: 'first' | 'every' | 'never'
   maxRenewals: number
   // the number the person set when it lay outside 0 to the cap and was taken to the nearer end; null otherwise
   maxRenewalsAsked: number | null
-  renewMethod: 'fork' | 'none'
   prepareBeforeCompact: boolean
   compact: boolean
+  // compact only while the cache lives an hour (idleCompact auto): on five minutes the person is mostly back
+  // after the compaction, which then cost them their conversation for nothing
+  compactHourOnly: boolean
   preparePrompt: string
   pingPrompt: string
   compactInstructions: string
   // null = read it from the data (transcript, model switch, settings)
   ttlMs: number | null
   minContextTokens: number
+  // the context size the person wants a compaction at; 0 = none
+  compactAtTokens: number
+  // whether Claude is told how full the context is, after a tool result in a turn
+  contextNotices: boolean
   // how long a question that does not wait for the cache (one the session asked for, an extension's) waits
   compactCountdownMs: number
   // how long before the time to act the cache question appears; 0 = automatic
@@ -89,6 +102,8 @@ export type Config = {
   display: 'band' | 'status' | 'both' | 'off'
   // the countdown of a warm cache shows once at most this much time is left; 0 = always
   showBelowMs: number
-  // whether the session's transcript may be read for the TTL the API granted
+  // whether the session's transcript may be read (cacheTtl other than settings)
   readTranscript: boolean
+  // the hour-long cache (cacheRequestHour): on, off, or as the person answers the question about their rhythm
+  requestHour: 'ask' | 'on' | 'off'
 }

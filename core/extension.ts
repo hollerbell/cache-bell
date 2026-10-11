@@ -14,6 +14,9 @@ export type ExtensionReason = {
   choices: readonly Choice[]
   // what the question opens with, and what is done when nobody answers
   selected: Choice
+  // the same where only the person's word compacts (sessionCompact = wait, the modes notify and keep);
+  // missing = as `selected`
+  waitSelected?: Choice
   // the reason in words, for the line under the choices
   why: (state: State) => string
 }
@@ -28,8 +31,9 @@ export type Extension = {
   answer: (state: State, choice: Choice) => Ext | null
   // The person worked on past its question without answering it.
   passedOver: (state: State) => Ext
-  // The conversation was compacted or cleared: what is still worth remembering.
-  reset: (ext: Ext, after: 'compacted' | 'cleared') => Ext
+  // The conversation was compacted or cleared: what is still worth remembering. tokensAfter: the size of the
+  // context after a compaction, where it is known.
+  reset: (ext: Ext, after: 'compacted' | 'cleared', tokensAfter: number | null) => Ext
   // its rows of the /bell status report
   status: (state: State) => string[]
   // the options it adds to the plugin's, each with its default

@@ -8,19 +8,21 @@ import type { EngineInterface, Register } from 'claude-code'
 import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKES_MAX, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
 import type { AskStyle, Choice, ChoiceText, Wake } from '../core/ask'
 import { resolveConfig, unknownWords } from '../core/config'
-import { decide, fallbackOf, initialState, needsHold } from '../core/decide'
+import { cacheBefore, decide, fallbackOf, initialState, isBackWithinHour, levelOf, needsHold } from '../core/decide'
 import { NONE } from '../core/extension'
 import type { Extend, Extension } from '../core/extension'
 import { COUNTDOWN_MAX_S, COUNTDOWN_MIN_S, countdownOf, fillInstructions, holdOf, isCacheHit } from '../core/guards'
 import { LOG_KEEP, LOG_SHOWN, OWN_CAUSE, isLogEntry, isLogKey, logEntry, logKey, logReport, outdated } from '../core/log'
 import type { Cause, LogEntry } from '../core/log'
-import { parseTtl, ttlFromSettings } from '../core/timing'
+import { SIGNAL_NONE, signalOf } from '../core/signal'
+import type { SignalSeen } from '../core/signal'
+import { MINUTE_MS, TTL_1H, TTL_5M, parseTtl, ttlFromSettings } from '../core/timing'
 import { digestOf, errorCode, noticeHead, problemReport } from '../core/report'
-import type { Digest } from '../core/report'
-import { isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript } from '../core/transcript'
+import type { Digest, SurfaceChange } from '../core/report'
+import { hasResponse, isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript } from '../core/transcript'
 import type { Action, AskReason, Config, Hold, Observation, State } from '../core/types'
-import { BAND_PREFIX, INTRO_KEY, INTRO_SEEN, MARK, PALETTE, PLUGIN, band, introOf, lookOf, sampleBand, statusEntry, statusReport, versionOf } from '../core/view'
-import type { Band, Intro, Look } from '../core/view'
+import { BAND_PREFIX, HOUR_KEY, HOUR_SECOND_KEY, INTRO_KEY, INTRO_SEEN, INTRO_SEEN_BEFORE_HOUR, MARK, RHYTHM_KEY, PALETTE, PLUGIN, band, compactsAtLevel, introOf, isHourAnswer, lookOf, sampleBand, secondChanceOf, statusEntry, statusReport, versionOf } from '../core/view'
+import type { Band, HourAnswer, HourState, Intro, IntroChoice, Look } from '../core/view'
 
 const machine = atom({ plugin: 'cache-bell', key: 'machine' } as const, null)
 // The path of the session's transcript: a read that failed is tried again also after the plugin was loaded anew.
@@ -48,6 +50,9 @@ const RESUME_READ_MS = 5000
 // After a read that failed: when it is tried again, the first, the second and every later time.
 const REREAD_MS = [15 * 1000, 60 * 1000]
 const REREAD_LATER_MS = 5 * 60 * 1000
+// Claude Code may write a turn's response to the transcript only after the turn's hooks ran: a read that
+// found no response at all is tried again after these times, each time only if the file grew.
+const LATE_MS = [3 * 1000, 10 * 1000, 30 * 1000]
 
 // The module's own variables start over at every reload; what must survive one is in `$.state`.
 let ticker: { cancel: () => void } | null = null
@@ -60,6 +65,13 @@ let readAt: number | null = null
 let unread = 0
 let rereadAt: number | null = null
 let isReading = false
+// How many of the late looks after a read without a response were taken; 0 = none is owed.
+let lateLooks = 0
+const lookLater = (now: number): number | null => {
+  const wait = LATE_MS[lateLooks]
+  lateLooks = wait === undefined ? 0 : lateLooks + 1
+  return wait === undefined ? null : now + wait
+}
 // Counts the transcripts this process was given: a read that began on one of them and ends after the next
 // was named says nothing of the new one.
 let transcriptNo = 0
@@ -133,6 +145,21 @@ const noted = ($: EngineInterface, text: string) => {
 // For /bell report: the surface the session started on and the model of the last request seen.
 let surface: string | undefined
 let lastModel: string | undefined
+// For /bell report: on which surfaces Claude Code asked for the band and on which the plugin drew one, how
+// many times; the surfaces that came and went.
+const bandAsks: Record<string, number> = {}
+const bandDraws: Record<string, number> = {}
+const roster: SurfaceChange[] = []
+const ROSTER_KEPT = 10
+// False where Claude Code would not take the hooks for surfaces that come and go.
+let isRosterWatched = false
+const noteRoster = (change: SurfaceChange) => {
+  roster.push(change)
+  if (roster.length > ROSTER_KEPT) roster.shift()
+}
+const drew = (where: string) => {
+  bandDraws[where] = (bandDraws[where] ?? 0) + 1
+}
 
 // The band's text depends on the clock, the state does not change between ticks: redraw only when the text
 // to show really changed.
@@ -179,7 +206,12 @@ const apply = async ($: EngineInterface, config: Config, observation: Observatio
   if (actions.length > 0 || drawn === '') await draw($, config, state)
 }
 
+// What was last said to Claude of how full the context is. Held in memory only, never written anywhere.
+let signalSeen: SignalSeen = SIGNAL_NONE
+
 const observe = ($: EngineInterface, config: Config, observation: Observation): Promise<void> => {
+  // A compaction or a /clear starts what was said to Claude of the context's size over.
+  if (observation.kind === 'compacted' || observation.kind === 'cleared') signalSeen = SIGNAL_NONE
   queue = queue
     .then(() => apply($, config, observation))
     .catch(err => noted($, `${observation.kind} failed: ${String(err)}`))
@@ -223,7 +255,9 @@ const tick = async ($: EngineInterface, config: Config) => {
   const state = await read($, machine)
   const hold = state !== null && needsHold(state, now, config) ? await holdNow($, state) : null
   await observe($, config, { kind: 'tick', gapMs, hold })
-  // The plugin was loaded anew with a read still owed: what the module knew of it is gone.
+  // The plugin was loaded anew with a read still owed: what the module knew of it is gone. A state kept by 0.3.0
+  // with a TTL from the settings or the default is a guess now, but no read is owed for it: the look by the
+  // session's id after the start reads the transcript, and where that finds none, the next turn does.
   if (state?.isTtlUnread === true && rereadAt === null && unread === 0 && !isReading && config.ttlMs === null) {
     if (!config.readTranscript) {
       // Nothing will be read: the default is all there is.
@@ -242,15 +276,190 @@ const tick = async ($: EngineInterface, config: Config) => {
   if (rereadAt !== null && now >= rereadAt) void readTranscriptTtl($, config, transcriptPath).catch(err => noted($, `transcript not read: ${String(err)}`))
 }
 
+// cacheRequestHour sets the variable Claude Code reads for the TTL it asks for, and a mark of its own next to
+// it with the same value. Where the two agree, the value is the plugin's: it is not the person's setting, also
+// after a reload, and it is the only value the plugin ever changes or takes away.
+const HOUR = '1h'
+const isOwnHour = async ($: EngineInterface): Promise<boolean> => {
+  const value = await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')
+  // Taken out with its mark for the time a shell command runs (hourHidden), it is still the plugin's.
+  if (isHourHidden && value === undefined) return true
+  const mark = await $.env.get('CACHE_BELL_PROMPT_CACHE_TTL')
+  return mark !== undefined && mark !== '' && mark === value
+}
+
 // What the person asked Claude Code for. Settings are read by name: the object can hold secrets.
 const readSettingsTtl = async ($: EngineInterface): Promise<number | null> => {
   const settings = (await $.settings.read()) as { promptCacheTtl?: unknown }
   return ttlFromSettings({
     force5m: await $.env.get('FORCE_PROMPT_CACHING_5M'),
-    envTtl: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+    envTtl: (await isOwnHour($)) ? undefined : await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
     settingTtl: settings.promptCacheTtl,
   })
 }
+
+// Whether the conversation has no response in it yet: its transcript is there, small, and holds none. Claude
+// Code writes the person's message before the request, so a new conversation has the file. Where that cannot
+// be told (reading switched off, the file not where it is looked for), it does not count as new: a conversation
+// resumed without a word of its past may still have a warm cache.
+const isNewConversation = async ($: EngineInterface, config: Config): Promise<boolean> => {
+  if (!config.readTranscript) return false
+  const path = transcriptPath ?? (await read($, transcript)) ?? (await transcriptById($))
+  if (typeof path !== 'string' || !(await $.fs.exists(path))) return false
+  const { size } = await $.fs.stat(path)
+  return size <= FS_READ_LIMIT && !hasResponse(await $.fs.read(path))
+}
+
+// Whether the person set a TTL of their own for Claude Code: in its settings, or in the environment, in any
+// spelling, also one the plugin cannot read. cacheTtl only tells the plugin what to count with, and Claude Code
+// asks for its default all the same; but set to 5m it holds the hour back too: the plugin would count five
+// minutes on a cache that lasts the hour, and renew and compact it for nothing.
+const hasOwnTtl = async ($: EngineInterface, config: Config): Promise<boolean> => {
+  if (config.ttlMs === TTL_5M) return true
+  const env = await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')
+  if (env !== undefined && env !== '' && !(await isOwnHour($))) return true
+  const { promptCacheTtl } = (await $.settings.read()) as { promptCacheTtl?: unknown }
+  if (promptCacheTtl !== undefined && promptCacheTtl !== null && promptCacheTtl !== '') return true
+  return (await readSettingsTtl($)) !== null
+}
+
+// cacheRequestHour or the person's answer, before a request of the main thread. The hour is asked for only
+// while the cache is cold anyway: on a warm cache the longer TTL would write it anew, so it waits for the next
+// cold moment (a new conversation, a cold or compacted cache). Given back, it goes at once: going from the
+// hour to five minutes writes nothing anew. A TTL the person set is never touched, and one set while the
+// plugin holds its hour takes over from it.
+const settleHour = async ($: EngineInterface, config: Config) => {
+  try {
+    await inHourTurn(() => dropStrayMark($))
+    const isOwn = await isOwnHour($)
+    const wants = (await wantsHour($, config)) && !(await hasOwnTtl($, config))
+    if (wants === isOwn) return
+    if (!wants) return await releaseHour($, config)
+    await queue
+    // Stood down meanwhile: the hour is the other plugin's to decide.
+    if (isYielding) return
+    const state = (await read($, machine)) ?? initialState(config)
+    const cache = cacheBefore(state, await $.clock.now())
+    if (cache === 'warm' || (cache === 'unknown' && !(await isNewConversation($, config)))) return
+    // The mark first: a value without it would pass for the person's.
+    await inHourTurn(async () => {
+      await $.env.set('CACHE_BELL_PROMPT_CACHE_TTL', HOUR)
+      await $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', HOUR)
+    })
+    await observe($, config, { kind: 'ttl', ttlMs: TTL_1H, source: 'requested' })
+  } catch (err) {
+    noted($, `the prompt cache TTL not changed: ${String(err)}`)
+  }
+}
+
+// Gives the plugin's hour back, and says what is asked for from now on: what the settings say, or Claude
+// Code's own default.
+const releaseHour = async ($: EngineInterface, config: Config) => {
+  await dropHour($)
+  const asked = await readSettingsTtl($)
+  await observe($, config, asked === null ? { kind: 'ttl', ttlMs: TTL_5M, source: 'default' } : { kind: 'ttl', ttlMs: asked, source: 'settings' })
+}
+
+// Where cacheRequestHour stands, for /bell status.
+const hourNow = async ($: EngineInterface, config: Config): Promise<HourState> => {
+  const isOwn = await isOwnHour($)
+  if (!(await wantsHour($, config))) return isOwn ? 'taking-back' : null
+  // A TTL of the person's own, also one set while the plugin holds its hour: that goes before the next request.
+  if (config.ttlMs === TTL_5M) return 'cache-ttl'
+  if (await hasOwnTtl($, config)) return 'own-ttl'
+  return isOwn ? 'asked' : 'waiting'
+}
+
+// A command the session runs in a shell inherits the environment, and with it the hour: a `claude -p` started
+// there would ask for it too and pay for the longer writes. While such commands run, the plugin's own value is
+// taken out of the environment and put back after the last of them ends, also when it fails or is called off.
+// The mark goes with it: a `claude` started there must not take a TTL its person sets for it for the plugin's
+// own. Only a value that is still the plugin's comes back, and a value somebody set in between is left as it
+// is. The main thread sends no request while its tool runs. A subagent's shell is left alone: the main thread
+// may send requests while it runs, and they would go out without the hour. So is the main thread's while a
+// subagent runs: the subagent's requests would go out without it, and with the hour back, write its cache anew.
+// The one switch: false, and shell commands inherit the hour as any other process does.
+const HIDES_HOUR_FROM_SHELLS = true
+let shellsRunning = 0
+let isHourHidden = false
+// Taking the hour out, putting it back and giving it away go one after another, each to its end. A command
+// that started while another took the hour out would find it hidden but still there, and run with it; one
+// that started while it was put back would find it neither hidden nor back, go uncounted and inherit it.
+let hourTurn: Promise<unknown> = Promise.resolve()
+const inHourTurn = <T,>(step: () => Promise<T>): Promise<T> => {
+  const done = hourTurn.then(step)
+  hourTurn = done.catch(() => undefined)
+  return done
+}
+
+// Before a shell command: whether it is counted, so that hourShown must follow it.
+const hourHidden = async ($: EngineInterface): Promise<boolean> => {
+  if (!HIDES_HOUR_FROM_SHELLS || isYielding) return false
+  return inHourTurn(async () => {
+    // Stood down meanwhile: the hour is the other plugin's to decide.
+    if (isYielding) return false
+    try {
+      // Not hidden: only the plugin's own value is taken out, also where commands still run after the hour was
+      // given back (dropHour).
+      if (!isHourHidden && !(await isOwnHour($))) return false
+    } catch (err) {
+      noted($, `the prompt cache TTL not read: ${String(err)}`)
+      return false
+    }
+    // Asked only where the hour is the plugin's: not for every shell command.
+    if (holdOf(null, await agentsNow($)) === 'agent') return false
+    shellsRunning += 1
+    if (isHourHidden) return true
+    isHourHidden = true
+    // Not taken out, the command runs with the hour: no reason to stop it. The value first, as in dropHour.
+    try {
+      await $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', undefined)
+      await $.env.set('CACHE_BELL_PROMPT_CACHE_TTL', undefined)
+    } catch (err) {
+      noted($, `the prompt cache TTL not taken out: ${String(err)}`)
+    }
+    return true
+  })
+}
+
+// After the last of the counted commands the hour comes back, if it is still the plugin's.
+const hourShown = ($: EngineInterface) =>
+  inHourTurn(async () => {
+    shellsRunning = Math.max(0, shellsRunning - 1)
+    if (shellsRunning > 0 || !isHourHidden) return
+    isHourHidden = false
+    await putBack($)
+  })
+
+const putBack = async ($: EngineInterface) => {
+  try {
+    // Nobody set either meanwhile: the mark first, as in settleHour.
+    const isUntouched = (await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')) === undefined && (await $.env.get('CACHE_BELL_PROMPT_CACHE_TTL')) === undefined
+    if (isUntouched) {
+      await $.env.set('CACHE_BELL_PROMPT_CACHE_TTL', HOUR)
+      await $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', HOUR)
+    }
+  } catch (err) {
+    noted($, `the prompt cache TTL not put back: ${String(err)}`)
+  }
+}
+
+// The mark left next to a value the person set over the plugin's goes: were they to set `1h` later, the two
+// would agree and their value would pass for the plugin's own.
+const dropStrayMark = async ($: EngineInterface) => {
+  const mark = await $.env.get('CACHE_BELL_PROMPT_CACHE_TTL')
+  if (mark === undefined || isHourHidden || (await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')) === mark) return
+  await $.env.set('CACHE_BELL_PROMPT_CACHE_TTL', undefined)
+}
+
+// Takes the plugin's own value away, the mark last.
+const dropHour = ($: EngineInterface) =>
+  inHourTurn(async () => {
+    // Taken out for a shell command, it does not come back after it.
+    isHourHidden = false
+    await $.env.set('CLAUDE_CODE_PROMPT_CACHE_TTL', undefined)
+    await $.env.set('CACHE_BELL_PROMPT_CACHE_TTL', undefined)
+  })
 
 // The end of the transcript: a small file whole, of a large one only what was appended since the last read.
 const readTail = async ($: EngineInterface, path: string, size: number): Promise<string> => {
@@ -261,7 +470,8 @@ const readTail = async ($: EngineInterface, path: string, size: number): Promise
 
 const readEnd = async ($: EngineInterface, path: string, bytes: number, timeoutMs = 10000): Promise<string> => {
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-  const result = await $.process.run(tailCommand(path, bytes, isWindows), { timeoutMs })
+  const systemRoot = isWindows ? await $.env.get('SystemRoot') : undefined
+  const result = await $.process.run(tailCommand(path, bytes, isWindows, systemRoot), { timeoutMs })
   if (result.exitCode !== 0) throw new Error(`tail exited with ${result.exitCode}`)
   return result.stdout
 }
@@ -270,8 +480,9 @@ const readEnd = async ($: EngineInterface, path: string, bytes: number, timeoutM
 const readFailed = async ($: EngineInterface, config: Config, err: unknown) => {
   unread += 1
   rereadAt = (await $.clock.now()) + (REREAD_MS[unread - 1] ?? REREAD_LATER_MS)
-  // Said once for a run of failures, not at every try.
-  if (unread === 1) noted($, `transcript not read, it is tried again: ${String(err)}`)
+  // Said once for a run of failures, and only when the first retry failed too: a read that ran out of time
+  // while many sessions started at once (a restart) goes through at the next try.
+  if (unread === 2) noted($, `transcript not read, it is tried again: ${String(err)}`)
   if (config.ttlMs === null) await observe($, config, { kind: 'ttl-unread', isUnread: true })
 }
 
@@ -284,14 +495,16 @@ const nameTranscript = async ($: EngineInterface, path: string) => {
   readAt = null
   unread = 0
   rereadAt = null
+  lateLooks = 0
   await update($, transcript, () => path)
 }
 
 // The TTL the API really granted is only in the transcript. It is read while it is not known, and then
 // seldom: a file that did not grow is not read at all, and a confirmed TTL is looked up again only now and
 // then. A read that fails is tried again, and until one goes through the core is told that the TTL is not
-// read. Where there is nothing to read (reading switched off, no transcript), the TTL stays what the
-// settings or the default say.
+// read. A read that found no response yet looks again a few times, for a row written late. Where there is
+// nothing to read (reading switched off, no transcript), the TTL stays what the settings or the default say:
+// a guess, on which the timer does nothing.
 async function readTranscriptTtl($: EngineInterface, config: Config, path: string | undefined): Promise<void> {
   if (!config.readTranscript || config.ttlMs !== null || path === undefined || path === '' || isReading) return
   isReading = true
@@ -309,11 +522,12 @@ async function readTranscriptTtl($: EngineInterface, config: Config, path: strin
     const state = await read($, machine)
     const isConfirmed = state !== null && state.ttlSource === 'transcript' && !state.isTtlUnread
     if (unread === 0 && size === readSize) {
-      rereadAt = null
+      rereadAt = lateLooks > 0 ? lookLater(now) : null
       return
     }
-    // Read a moment ago: what was appended since is read once that moment has passed, turn or no turn.
-    if (unread === 0 && isConfirmed && readAt !== null && now - readAt < RECHECK_MS) {
+    // Read a moment ago: what was appended since is read once that moment has passed, turn or no turn. A
+    // late look is not put off: the read before it found no response.
+    if (unread === 0 && lateLooks === 0 && isConfirmed && readAt !== null && now - readAt < RECHECK_MS) {
       rereadAt = readAt + RECHECK_MS
       return
     }
@@ -323,7 +537,8 @@ async function readTranscriptTtl($: EngineInterface, config: Config, path: strin
     readSize = size
     readAt = now
     unread = 0
-    rereadAt = null
+    if (ttlMs !== null) lateLooks = 0
+    rereadAt = ttlMs === null ? lookLater(now) : null
     await observe($, config, ttlMs === null ? { kind: 'ttl-unread', isUnread: false } : { kind: 'ttl', ttlMs, source: 'transcript' })
   } catch (err) {
     await readFailed($, config, err)
@@ -372,8 +587,10 @@ const resumed = async ($: EngineInterface, config: Config, e: { transcript_path?
 // was resumed in a process that was told nothing: it is taken up as one. Otherwise the turn's read is done.
 // With reading the transcript switched off nothing is looked for: the path would serve no read.
 const FIND_AFTER_MS = 2000
-const findTranscript = async ($: EngineInterface, config: Config) => {
-  if (isNamedByEvent || !config.readTranscript) return
+
+// The file Claude Code keeps for this session, by its id: null when it is in none of the places it would be,
+// undefined when those places are not known.
+const transcriptById = async ($: EngineInterface): Promise<string | null | undefined> => {
   // Claude Code's own directory: the one it is told, or `.claude` in the home directory, which Windows names
   // in USERPROFILE. A variable set to nothing counts as not set.
   const told = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''
@@ -381,15 +598,20 @@ const findTranscript = async ($: EngineInterface, config: Config) => {
   if (told === '') home = ((await $.env.get('OS')) === 'Windows_NT' ? await $.env.get('USERPROFILE') : await $.env.get('HOME')) ?? ''
   const configDir = told !== '' ? told : home === '' ? '' : `${home}/.claude`
   const id = await $.session.id()
-  let found: string | undefined
+  let isLooked = false
   for (const dir of [await $.session.root(), await $.session.cwd()]) {
     const path = transcriptPathOf(configDir, dir, id)
-    if (path !== null && (await $.fs.exists(path))) {
-      found = path
-      break
-    }
+    if (path === null) continue
+    isLooked = true
+    if (await $.fs.exists(path)) return path
   }
-  if (found === undefined || isNamedByEvent) return
+  return isLooked ? null : undefined
+}
+
+const findTranscript = async ($: EngineInterface, config: Config) => {
+  if (isNamedByEvent || !config.readTranscript) return
+  let found = await transcriptById($)
+  if (typeof found !== 'string' || isNamedByEvent) return
   // The path kept from before a reload is this file in an event's spelling: it stays as it is.
   transcriptPath ??= (await read($, transcript)) ?? undefined
   if (transcriptPath !== undefined && isSamePath(transcriptPath, found)) found = transcriptPath
@@ -584,6 +806,24 @@ const sizeNow = async ($: EngineInterface): Promise<number | null> => {
   }
 }
 
+
+// The line on how full the context is that goes with this tool result, if one is due: Claude Code hands
+// the result's `context` to the model after the result, and the person does not see it.
+const signalNow = async ($: EngineInterface, config: Config): Promise<string | null> => {
+  try {
+    const { tokens, window } = (await $.session.usage()).context
+    // The level is this session's (/bell set) or the option's. Where Claude may not ask for a compaction it
+    // is told only how full the context is.
+    const level = levelOf((await read($, machine)) ?? initialState(config), config)
+    const askFromTokens = config.sessionCompact === 'off' ? 0 : level
+    const next = signalOf(tokens ?? null, window, signalSeen, { limitTokens: level, askFromTokens, isStatusOn: config.contextNotices })
+    signalSeen = next.seen
+    return next.line
+  } catch {
+    return null
+  }
+}
+
 // The session is told what it left for itself: a turn of its own, as the announcement is. Nothing is sent
 // when the person is writing a message, they will say what comes next; nor when work began since the
 // compaction started (`atTurns`), a message sent while it ran included. The prompt waits for the session to
@@ -612,7 +852,7 @@ const wake = async ($: EngineInterface, text: string, atTurns: number) => {
   if (wakeSent === prompt) wakeSent = null
 }
 
-const compact = async ($: EngineInterface, config: Config, anchorAt: number | null) => {
+const compact = async ($: EngineInterface, config: Config) => {
   // A second passed since the core decided: a turn that began meanwhile takes the compaction back.
   await queue
   const state = await read($, machine)
@@ -622,7 +862,9 @@ const compact = async ($: EngineInterface, config: Config, anchorAt: number | nu
   const hold = state.isOrdered ? null : await holdNow($, state)
   if (hold !== null) return observe($, config, { kind: 'held', hold })
   try {
-    const instructions = fillInstructions(config.compactInstructions, await $.clock.now(), anchorAt)
+    // {idle} counts from the person's last message, as the band does after the compaction: renewals and the
+    // announcement move the cache's anchor, not the time the session stood idle.
+    const instructions = fillInstructions(config.compactInstructions, await $.clock.now(), state.workedAt)
     const before = await sizeNow($)
     const why = cause
     const said = note
@@ -637,7 +879,7 @@ const compact = async ($: EngineInterface, config: Config, anchorAt: number | nu
     })
     // The state first, the log after: a turn that starts meanwhile must find the compaction noted.
     if (result.skip !== undefined) return observe($, config, { kind: 'compact-failed' })
-    const sizes = { before: result.tokensBefore ?? before, after: result.tokensAfter ?? null }
+    const sizes = { before: result.tokensBefore ?? before, after: result.tokensAfter ?? null, isIdle: why.why === 'cache' }
     await observe($, config, { kind: 'compacted', own: sizes })
     await writeLog($, why, sizes.before, sizes.after, said)
     if (why.why === 'session' && then !== '' && !isYielding) void wake($, then, atTurns)
@@ -703,7 +945,7 @@ const perform = ($: EngineInterface, config: Config, action: Action, state: Stat
   }
   else if (action.kind === 'prepare') void prepare($, config)
   // A compaction is refused while a turn's hook is still open: a moment later the turn is over.
-  else if (action.kind === 'compact') $.clock.after(1000, () => void compact($, config, state.anchorAt))
+  else if (action.kind === 'compact') $.clock.after(1000, () => void compact($, config))
 }
 
 // Whether this plugin stands down, taking everything of its own off the screen the first time it finds out.
@@ -724,6 +966,14 @@ const yields = async ($: EngineInterface): Promise<boolean> => {
     $.ui.status(undefined)
     $.ui.invalidate('ui.render')
     noted($, 'standing down: the plugin built on this one runs in the session')
+    // The hour asked for is the other plugin's to decide now. Taken away on a warm cache it costs nothing:
+    // the next request still reads the hour's entry (measured on 2026-10-10), only a change the other way
+    // writes the cache anew.
+    try {
+      if (await isOwnHour($)) await dropHour($)
+    } catch (err) {
+      noted($, `the prompt cache TTL not taken back: ${String(err)}`)
+    }
   }
   isWatching = false
   ticker?.cancel()
@@ -747,22 +997,31 @@ const readLook = async ($: EngineInterface) => {
 
 // The notice is shown until the person presses OK or sends a message; only then is it remembered as seen,
 // in the plugin's store, so it comes once on a machine and not in every session.
+// A machine that saw the notice before it asked about the hour (0.2.x, 0.3.0, 0.3.1) sees it again only for
+// the question, or to be told that Claude now compacts past the level.
 const showIntro = async ($: EngineInterface, config: Config) => {
+  let asksHour = false
+  let isUpgrade = false
   try {
-    if ((await $.store.get(INTRO_KEY)) === INTRO_SEEN) return
+    const seen = await $.store.get(INTRO_KEY)
+    if (seen === INTRO_SEEN) return
+    asksHour = await mayAskHour($, config)
+    isUpgrade = seen === INTRO_SEEN_BEFORE_HOUR
+    if (isUpgrade && !asksHour && !compactsAtLevel(config)) return
   } catch (err) {
     noted($, `store not read: ${String(err)}`)
   }
   // The plugin built on this one may have turned up while the store was read: then it is its to tell.
   if (isYielding) return
-  intro = introOf(config)
+  intro = introOf(config, asksHour, isUpgrade)
   isIntroLook = false
   if (intro !== null) $.ui.invalidate('ui.render')
 }
 
 // Several sessions may show the notice at once: OK in one of them puts it away in all, within a few seconds.
+// The second chance is this session's own.
 const followIntro = async ($: EngineInterface, now: number) => {
-  if (intro === null || isIntroLook || now - introAskedAt < INTRO_ASK_MS) return
+  if (intro === null || intro.isSecond === true || isIntroLook || now - introAskedAt < INTRO_ASK_MS) return
   introAskedAt = now
   try {
     if ((await $.store.get(INTRO_KEY)) !== INTRO_SEEN || intro === null || isIntroLook) return
@@ -774,17 +1033,72 @@ const followIntro = async ($: EngineInterface, now: number) => {
   $.ui.invalidate('ui.render')
 }
 
+// The notice put away: by OK, an answer or a message. Only then is it remembered, the second chance under a
+// key of its own.
 const dismissIntro = async ($: EngineInterface) => {
   if (intro === null) return
+  const told = intro
   intro = null
   $.ui.invalidate('ui.render')
   // A look taken down is not the notice seen: the other sessions keep theirs.
   if (isIntroLook) return
   try {
-    await $.store.set(INTRO_KEY, INTRO_SEEN)
+    if (told.isSecond === true) await $.store.set(HOUR_SECOND_KEY, 1)
+    else await $.store.set(INTRO_KEY, INTRO_SEEN)
   } catch (err) {
     noted($, `store not written: ${String(err)}`)
   }
+}
+
+// The answer about the rhythm of work, kept for the machine. Every session on the machine follows it before its
+// next request (settleHour): an hour at the next moment the cache is cold anyway, no hour at once.
+const answerHour = async ($: EngineInterface, choice: IntroChoice) => {
+  // A look is answered by nobody.
+  if (!isIntroLook) {
+    try {
+      await $.store.set(HOUR_KEY, choice.answer)
+      if (choice.rhythm !== undefined) await $.store.set(RHYTHM_KEY, choice.rhythm)
+    } catch (err) {
+      noted($, `store not written: ${String(err)}`)
+    }
+  }
+  await dismissIntro($)
+}
+
+// The person's answer on this machine, if any.
+const hourAnswer = async ($: EngineInterface): Promise<HourAnswer | undefined> => {
+  const answer = await $.store.get(HOUR_KEY)
+  return isHourAnswer(answer) ? answer : undefined
+}
+
+// Whether the hour-long cache is wanted: by the option, or, where it is ask, by the person's answer.
+const wantsHour = async ($: EngineInterface, config: Config): Promise<boolean> =>
+  config.enabled && config.requestHour !== 'off' && (config.requestHour === 'on' || (await hourAnswer($)) === 'yes')
+
+// Whether the question about the rhythm of work is worth asking: nobody answered it, and the hour is not
+// settled otherwise (the option, a TTL of the person's own).
+const mayAskHour = async ($: EngineInterface, config: Config): Promise<boolean> =>
+  config.enabled && config.requestHour === 'ask' && (await hourAnswer($)) === undefined && !(await hasOwnTtl($, config))
+
+// The second chance: the person's message came within the hour after a compaction of the plugin's own. It is
+// put up when that turn ends, once on a machine, to whoever did not say yes yet.
+// How many minutes after the compaction the person came back; null = no second chance is due.
+let secondDue: number | null = null
+const offerSecondChance = async ($: EngineInterface, config: Config) => {
+  const minutes = secondDue
+  if (minutes === null) return
+  secondDue = null
+  if (intro !== null || isYielding) return
+  try {
+    if (!config.enabled || config.requestHour !== 'ask' || (await $.store.get(HOUR_SECOND_KEY)) !== undefined) return
+    if ((await hourAnswer($)) === 'yes' || (await hasOwnTtl($, config))) return
+  } catch (err) {
+    noted($, `store not read: ${String(err)}`)
+    return
+  }
+  intro = secondChanceOf(minutes)
+  isIntroLook = false
+  $.ui.invalidate('ui.render')
 }
 
 // Nothing is awaited between the test and the assignment, so two events at once start one timer.
@@ -794,14 +1108,29 @@ const ensureStarted = ($: EngineInterface, config: Config) => {
 }
 
 const start = async ($: EngineInterface, config: Config, isInteractive: boolean) => {
-  // Nobody is at the prompt in `claude -p` or under the SDK: there the plugin does nothing.
+  // Nobody is at the prompt in `claude -p` or under the SDK: there the plugin does nothing, except that it
+  // drops an hour of its own the run inherited.
   isWatching = isInteractive
   if (!isWatching) {
     ticker?.cancel()
     ticker = null
+    // Started from a command that kept the plugin's hour (a subagent's shell, a hook), it came with its mark:
+    // given back here, so that nothing started that way pays for the longer writes.
+    try {
+      if (await isOwnHour($)) await dropHour($)
+    } catch (err) {
+      noted($, `the prompt cache TTL not given back: ${String(err)}`)
+    }
     return
   }
   if (await yields($)) return
+  // Loaded switched off, or with the hour no longer wanted: the plugin's own hour goes at once, as after
+  // /bell hour off, not only with the next request.
+  try {
+    if ((await isOwnHour($)) && (!(await wantsHour($, config)) || (await hasOwnTtl($, config)))) await releaseHour($, config)
+  } catch (err) {
+    noted($, `the prompt cache TTL not given back: ${String(err)}`)
+  }
   ensureStarted($, config)
   findAt = (await $.clock.now()) + FIND_AFTER_MS
   await readLook($)
@@ -810,7 +1139,7 @@ const start = async ($: EngineInterface, config: Config, isInteractive: boolean)
     await $.command.register({
       name: 'bell',
       description: 'Cache Bell: the state of the prompt cache',
-      argumentHint: 'status | report | log [count] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off',
+      argumentHint: 'status | report | log [count] | hour [on|off] | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off',
       immediate: true,
     })
   } catch (err) {
@@ -865,7 +1194,7 @@ const versionNow = async ($: EngineInterface): Promise<string | undefined> => {
 }
 
 // What /bell takes, said whenever it is given something else.
-const USAGE = 'Usage: /bell status | report | log [count] | demo [seconds] [bg] [stay]\n       | show calm|act|cold|intro|off'
+const USAGE = 'Usage: /bell status | report | log [count] | hour [on|off] | set <level>K|off|default\n       | demo [seconds] [bg] [stay] | show calm|act|cold|intro|off'
 
 // What a report of a problem needs, gathered for the person to paste: see core/report.ts for what it holds.
 // The end of a large transcript is given half the hook's time: a report without it beats no report.
@@ -888,12 +1217,18 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
         size = (await $.fs.stat(path)).size
         // Switched off, the transcript is not read for a report either.
         tail = !config.readTranscript
-          ? 'readTranscript is off'
+          ? 'cacheTtl is settings'
           : digestOf(size <= FS_READ_LIMIT ? await $.fs.read(path) : await readEnd($, path, TAIL_MAX_BYTES, REPORT_READ_MS))
       }
     } catch (err) {
       tail = errorCode(String(err))
     }
+  }
+  let surfacesNow: readonly string[] | null = null
+  try {
+    surfacesNow = await $.session.surfaces()
+  } catch {
+    // The report says it could not be read.
   }
   let askedTtlMs: number | null = null
   let contextTokens: number | undefined
@@ -907,6 +1242,7 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
     version: await versionNow($),
     isWindows: (await $.env.get('OS')) === 'Windows_NT',
     surface,
+    surfaces: { now: surfacesNow, asked: { ...bandAsks }, drawn: { ...bandDraws }, changes: isRosterWatched ? [...roster] : null },
     model: lastModel,
     env: {
       bedrock: await $.env.get('CLAUDE_CODE_USE_BEDROCK'),
@@ -916,6 +1252,7 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
       noCaching: await $.env.get('DISABLE_PROMPT_CACHING'),
       force5m: await $.env.get('FORCE_PROMPT_CACHING_5M'),
       ttl: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+      isTtlOwn: await isOwnHour($),
     },
     askedTtlMs,
     contextTokens,
@@ -924,6 +1261,43 @@ const reportNow = async ($: EngineInterface, config: Config): Promise<string> =>
     tail,
     notices,
   })
+}
+
+// /bell hour on|off: the answer about the rhythm of work, changed for the machine; alone, what stands now.
+const hourCommand = async ($: EngineInterface, config: Config, word: string | undefined): Promise<string> => {
+  if (word !== undefined && word !== 'on' && word !== 'off') return 'Usage: /bell hour [on|off]'
+  try {
+    if (word !== undefined) await $.store.set(HOUR_KEY, word === 'on' ? 'yes' : 'no')
+    // Off goes at once in this session, and in the others with their next request.
+    const isReleased = !(await wantsHour($, config)) && (await isOwnHour($))
+    if (isReleased) await releaseHour($, config)
+    const answer = await hourAnswer($)
+    const said = answer === undefined ? 'You did not answer yet: the hour-long cache is not asked for.' : answer === 'yes' ? 'On: Cache Bell asks Claude Code for the hour-long cache.' : 'Off: Cache Bell does not ask for the hour-long cache.'
+    const rows = [said]
+    if (isReleased) rows.push('The hour asked for in this session is given back now; other sessions give it back with their next request.')
+    else if (word === 'on') rows.push('It takes effect at the next moment the prompt cache is cold anyway, in every session on this machine.')
+    if (config.requestHour !== 'ask') rows.push(`${PLUGIN}.cacheRequestHour is ${config.requestHour} in /config: it decides, whatever the answer.`)
+    if (config.ttlMs === TTL_5M) rows.push(`${PLUGIN}.cacheTtl is 5m in /config, so Cache Bell does not ask for the hour-long cache.`)
+    else if (await hasOwnTtl($, config)) rows.push('A TTL of your own is set: Cache Bell leaves it as it is and asks for nothing.')
+    return rows.join('\n')
+  } catch (err) {
+    return `The answer could not be kept: ${String(err)}`
+  }
+}
+
+// /bell set 300 | 300K | off | default: the compaction level of this session alone, kept in its state;
+// nothing goes to settings.json.
+const SET_USAGE = 'Usage: /bell set <level>K | off | default, the level 1K to 10000K'
+const setCommand = async ($: EngineInterface, config: Config, word: string | undefined): Promise<string> => {
+  if (config.profile !== 'bellcompact' || !config.enabled) return `The compaction level counts only in the bellcompact profile; ${PLUGIN}.profile is ${config.profile}${config.enabled ? '' : ' and the plugin is off'}.`
+  const number = /^(\d+)k?$/.exec(word ?? '')
+  const kilo = number === null ? null : Number(number[1])
+  if (word !== 'off' && word !== 'default' && (kilo === null || kilo < 1 || kilo > 10_000)) return SET_USAGE
+  const levelTokens = word === 'default' ? null : word === 'off' ? 0 : (kilo ?? 0) * 1000
+  await observe($, config, { kind: 'level', levelTokens })
+  if (levelTokens === null) return `This session compacts from the level of ${PLUGIN}.compactLevelK again: ${config.compactAtTokens > 0 ? `${config.compactAtTokens / 1000}K` : 'off'}.`
+  if (levelTokens === 0) return 'This session is not asked to compact at a size. /bell set default puts the level of the options back.'
+  return `This session is asked to compact once its context is past ${levelTokens / 1000}K, at a good moment. /bell set default puts the level of the options back.`
 }
 
 const command = async ($: EngineInterface, config: Config, unknown: readonly string[], args: string) => {
@@ -966,13 +1340,21 @@ const command = async ($: EngineInterface, config: Config, unknown: readonly str
     }
   }
   if (verb === 'report') return { text: await reportNow($, config) }
+  if (verb === 'hour') return { text: await hourCommand($, config, words[1]?.toLowerCase()) }
+  if (verb === 'set') return { text: await setCommand($, config, words[1]?.toLowerCase()) }
   if (verb !== '' && verb !== 'status') {
     return { text: USAGE }
   }
   await queue
   const state = (await read($, machine)) ?? initialState(config)
   const usage = await $.session.usage()
-  const report = statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($), unknown }, extension)
+  let hour: HourState = null
+  try {
+    hour = await hourNow($, config)
+  } catch {
+    // The status goes without the row.
+  }
+  const report = statusReport(state, await $.clock.now(), config, { contextTokens: usage.context.tokens, version: await versionNow($), unknown, hour }, extension)
   // While a turn runs (the person's, or the plugin's own announcement) Claude Code holds a command's answer
   // back until the turn is over, when it no longer holds. A notice shows at once; it is one line.
   if (state.phase === 'BUSY' || state.phase === 'PREPARING') {
@@ -995,6 +1377,22 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     await start($, config, e.isInteractive)
     return next(e)
   })
+
+  // Another surface (the desktop app, a phone) came or went: kept for /bell report, by its kind only. Should
+  // Claude Code not take these hooks, only the report goes without them, never the plugin.
+  try {
+    on('session.attach', async ($, e, next) => {
+      noteRoster({ surface: e.surface, change: 'attached' })
+      return next(e)
+    })
+    on('session.detach', async ($, e, next) => {
+      noteRoster({ surface: e.surface, change: 'left' })
+      return next(e)
+    })
+    isRosterWatched = true
+  } catch {
+    isRosterWatched = false
+  }
 
   // A /clear ends the conversation and starts no new session.start: forget what was known of the cache.
   on('session.end', async ($, e, next) => {
@@ -1062,6 +1460,36 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     return { result: requestAnswer(config.sessionCompact, isWatching && config.enabled, taken, wakes) }
   })
 
+  // Any other tool of the main thread: its result may carry a line on how full the context is. With both
+  // options off nothing is asked and nothing added.
+  on('tool.call', async ($, e, next) => {
+    const isOff = !config.contextNotices && (config.sessionCompact === 'off' || levelOf((await read($, machine)) ?? initialState(config), config) === 0)
+    const isOwn = e.tool === 'mcp__cache-bell__compact'
+    if (isOff || isOwn || isYielding || !isWatching || !config.enabled || (e as { agentId?: string }).agentId !== undefined) return next(e)
+    const done = await next(e)
+    if (done.deny !== undefined) return done
+    const line = await signalNow($, config)
+    return line === null ? done : { ...done, context: [...(done.context ?? []), line] }
+  })
+
+  // A shell command runs without the plugin's hour (hourHidden). The event goes on as it came.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const isCounted = (e as { agentId?: string }).agentId === undefined && (await hourHidden($))
+    try {
+      return await next(e)
+    } finally {
+      if (isCounted) await hourShown($)
+    }
+  })
+  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+    const isCounted = (e as { agentId?: string }).agentId === undefined && (await hourHidden($))
+    try {
+      return await next(e)
+    } finally {
+      if (isCounted) await hourShown($)
+    }
+  })
+
   // What the person types into the prompt moves a question's selection.
   on('prompt.edit', async ($, e, next) => {
     const edited = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
@@ -1098,6 +1526,14 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return { drop: `${PLUGIN}: ${OVERTAKEN}` }
     nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
     if (isPerson) void dismissIntro($)
+    // Back within the hour after the plugin's own compaction: the turn this message starts ends with the
+    // second chance. Read before the turn starts, which forgets the compaction.
+    if (isPerson && isWatching) {
+      const kept = await read($, machine)
+      const now = await $.clock.now()
+      const at = kept?.lastCompaction?.at
+      if (kept !== null && at !== undefined && isBackWithinHour(kept, now)) secondDue = Math.max(1, Math.round((now - at) / MINUTE_MS))
+    }
     // The message is sent: the typing that wrote it is over, and must not hold back what the message asks for.
     if (isPerson) lastEditAt = null
     // The person's message, also one sent into a turn that is running, takes back what the session asked
@@ -1171,6 +1607,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (e.agentId === undefined) seen.requests += 1
     if (isWatching && e.agentId === undefined) {
       lastModel = e.model
+      await settleHour($, config)
       await observe($, config, { kind: 'request', sentAt: await $.clock.now() })
     }
     return yield* next(e)
@@ -1189,6 +1626,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
         note = ''
         wakeText = ''
       }
+      await offerSecondChance($, config)
     }
     return result
   })
@@ -1206,6 +1644,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       // What fails here must not keep the other Stop hooks from running.
       try {
         await nameTranscript($, path)
+        // Every turn has all its late looks.
+        lateLooks = 0
         if (config.readTranscript && config.ttlMs === null) {
           const owedAt = (await $.clock.now()) + STOP_OWED_MS
           rereadAt = rereadAt === null ? owedAt : Math.min(rereadAt, owedAt)
@@ -1230,7 +1670,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       const why: Cause = e.trigger === 'manual' ? { why: 'manual', by: 'person' } : { why: 'auto', by: 'claude-code' }
       await writeLog($, why, result.tokensBefore ?? null, result.tokensAfter ?? null, '')
     }
-    if (isWatching && isInstalled) await observe($, config, { kind: 'compacted' })
+    if (isWatching && isInstalled) await observe($, config, { kind: 'compacted', tokensAfter: result.tokensAfter ?? null })
     return result
   })
 
@@ -1255,9 +1695,11 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    bandAsks[e.surface] = (bandAsks[e.surface] ?? 0) + 1
     if (isYielding) return next(e)
     if (question !== null && !e.props.hasSurvey) {
       const { Box, Button, Text } = $.ui.resolve(e)
+      drew(e.surface)
       const asked = question
       const { title, head, foot } = questionParts(asked.isTyped, asked.why, textOf(asked.selected))
       const leftMs = leftOf(asked, await $.clock.now())
@@ -1292,6 +1734,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     }
     if (intro !== null && !e.props.hasSurvey) {
       const { Box, Button, Text } = $.ui.resolve(e)
+      drew(e.surface)
       const told = intro
       return (
         <Box flexDirection="column">
@@ -1306,13 +1749,29 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
               <Text>{row}</Text>
             </Box>
           ))}
+          {told.question === undefined ? null : (
+            <Box key="intro-question" paddingLeft={2}>
+              <Text bold>{told.question}</Text>
+            </Box>
+          )}
           <Box key="intro-once" paddingLeft={2}>
             <Text dimColor>{told.once}</Text>
           </Box>
-          <Box key="intro-foot" flexDirection="row" gap={2} paddingLeft={2}>
-            <Button key="intro-ok" label="OK" variant="primary" onPress={() => void dismissIntro($)} />
-            <Text dimColor>{told.hint}</Text>
-          </Box>
+          {told.question === undefined ? (
+            <Box key="intro-foot" flexDirection="row" gap={2} paddingLeft={2}>
+              <Button key="intro-ok" label="OK" variant="primary" onPress={() => void dismissIntro($)} />
+              <Text dimColor>{told.hint}</Text>
+            </Box>
+          ) : (
+            <Box key="intro-foot" flexDirection="column" paddingLeft={2}>
+              <Box key="intro-choices" flexDirection="row" gap={2}>
+                {(told.choices ?? []).map(choice => (
+                  <Button key={choice.key} label={choice.label} onPress={() => void answerHour($, choice)} />
+                ))}
+              </Box>
+              <Text dimColor>{told.hint}</Text>
+            </Box>
+          )}
         </Box>
       )
     }
@@ -1323,6 +1782,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
     const { Box, Text } = $.ui.resolve(e)
     const color = view.tone === 'calm' ? undefined : PALETTE[look][view.tone]
+    drew(e.surface)
 
     return (
       <Box>

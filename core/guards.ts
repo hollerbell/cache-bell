@@ -50,9 +50,10 @@ export const countdownOf = (value: unknown, isUserAsked: unknown = false): numbe
   return Math.min(Math.max(Math.round(value), COUNTDOWN_MIN_S), COUNTDOWN_MAX_S) * 1000
 }
 
-// {time} and {idle} in the compaction instructions: when it runs and how many minutes the session was idle.
-export const fillInstructions = (template: string, now: number, anchorAt: number | null): string => {
+// {time} and {idle} in the compaction instructions: when it runs and how many minutes passed since the
+// person's last message (`workedAt`).
+export const fillInstructions = (template: string, now: number, workedAt: number | null): string => {
   const time = `${new Date(now).toISOString().slice(0, 16).replace('T', ' ')} UTC`
-  const idle = anchorAt === null ? '?' : String(Math.max(0, Math.round((now - anchorAt) / MINUTE_MS)))
+  const idle = workedAt === null ? '?' : String(Math.max(0, Math.round((now - workedAt) / MINUTE_MS)))
   return template.replaceAll('{time}', time).replaceAll('{idle}', idle)
 }

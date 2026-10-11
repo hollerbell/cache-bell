@@ -1,10 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
-import { resolveConfig } from '../../core/config'
 import { ASK_GRACE_MS, decide, initialState, needsHold } from '../../core/decide'
 import { TYPING_MS, holdOf } from '../../core/guards'
 import type { Action, Hold, Observation, State } from '../../core/types'
 import { band, statusReport } from '../../core/view'
+import { configOf } from './options'
 
 const S = 1000
 // A Monday morning: 2026-01-12 09:00 UTC.
@@ -13,10 +13,10 @@ const T0 = Date.UTC(2026, 0, 12, 9)
 const ACT = T0 + 240 * S
 const MAX = T0 + 275 * S
 
-const base = resolveConfig({})
+const base = configOf({})
 const HOLDS: Hold[] = ['typing', 'agent']
 
-const state = (over: Partial<State> = {}): State => ({ ...initialState(base), phase: 'WARM', anchorAt: T0, contextTokens: 150000, ...over })
+const state = (over: Partial<State> = {}): State => ({ ...initialState(base), phase: 'WARM', anchorAt: T0, ttlSource: 'transcript', contextTokens: 150000, ...over })
 // The renewals are used up: what comes next on the cache's course is the compaction.
 const due = (over: Partial<State> = {}): State => state({ renewals: 2, isAsked: true, ...over })
 const tick = (hold: Hold | null = null): Observation => ({ kind: 'tick', gapMs: S, hold })
@@ -84,7 +84,7 @@ for (const hold of HOLDS) {
   })
 
   test(`a renewal does not wait for ${hold}`, () => {
-    const renewing = decide(state(), ACT, tick(hold), resolveConfig({ ask: 'never', mode: 'custom' }))
+    const renewing = decide(state(), ACT, tick(hold), configOf({ idleAsk: 'never' }))
     expect(renewing.state).toMatchObject({ phase: 'RENEWING', held: null })
     expect(kinds(renewing.actions)).toEqual(['renew', 'redraw'])
   })
@@ -115,7 +115,7 @@ for (const hold of HOLDS) {
   })
 
   test(`what the session asked for waits for ${hold} and then needs no announcement`, () => {
-    const auto = resolveConfig({ sessionCompact: 'auto' })
+    const auto = configOf({ compactOnRequest: 'auto' })
     const busy = state({ phase: 'BUSY', isRequested: true })
     const waiting = decide(busy, T0 + S, { kind: 'turn-complete', hold }, auto)
     expect(waiting.state).toMatchObject({ phase: 'WARM', held: { by: hold, isTold: true } })
@@ -155,7 +155,7 @@ for (const hold of HOLDS) {
   test(`the band and the status report say that the compaction waits for ${hold}`, () => {
     const waiting = decide(due(), ACT, tick(hold), base).state
     const what = { typing: 'you to finish typing', agent: 'a running subagent' }[hold]
-    expect(band(waiting, ACT, base)).toEqual({ text: `h⣿ Cache Bell: prompt cache expires in 0:35 · lifetime 5m assumed, not yet seen in the data · compaction waits for ${what}`, tone: 'warn' })
+    expect(band(waiting, ACT, base)).toEqual({ text: `h⣿ Cache Bell: prompt cache expires in 0:35 · compaction waits for ${what}`, tone: 'warn' })
     expect(statusReport(waiting, ACT, base, { contextTokens: 150000 })).toContain(`\nCompaction waits for ${what}\n`)
     const gone = decide(waiting, MAX, tick(hold), base).state
     expect(band(gone, MAX, base)?.text).toBe('h⣿ Cache Bell: prompt cache expired, the compaction was postponed · the next message re-sends 150k tokens uncached')
@@ -163,7 +163,7 @@ for (const hold of HOLDS) {
     // On an hour-long cache the line shows while the compaction waits, however much time is left.
     const long = state({ ttlMs: 3600 * S, held: { by: hold, isTold: true } })
     expect(band(state({ ttlMs: 3600 * S }), T0 + S, base)).toBeNull()
-    expect(band(long, T0 + S, base)?.text).toBe(`h⣿ Cache Bell: prompt cache expires in 54 min · lifetime 1h assumed, not yet seen in the data · compaction waits for ${what}`)
+    expect(band(long, T0 + S, base)?.text).toBe(`h⣿ Cache Bell: prompt cache expires in 54 min · compaction waits for ${what}`)
   })
 }
 
@@ -175,7 +175,7 @@ test('what waits changes with what is in the way, and the person at work ends th
 })
 
 test('a compaction that waits for a subagent outlasts the turn that brings its result', () => {
-  const waiting = decide(state({ phase: 'BUSY', isRequested: true }), T0 + S, { kind: 'turn-complete', hold: 'agent' }, resolveConfig({ sessionCompact: 'auto' })).state
+  const waiting = decide(state({ phase: 'BUSY', isRequested: true }), T0 + S, { kind: 'turn-complete', hold: 'agent' }, configOf({ compactOnRequest: 'auto' })).state
   const steps: [number, Observation][] = [
     [T0 + 100 * S, { kind: 'turn-start', by: 'other' }],
     [T0 + 101 * S, { kind: 'request', sentAt: T0 + 101 * S }],
@@ -188,7 +188,7 @@ test('a compaction that waits for a subagent outlasts the turn that brings its r
 
 test('a compaction that waits is still there after the cache was renewed', () => {
   const waiting = state({ held: { by: 'agent', isTold: true } })
-  const never = resolveConfig({ mode: 'custom', ask: 'never' })
+  const never = configOf({ idleAsk: 'never' })
   const renewing = decide(waiting, ACT, tick('agent'), never)
   expect(renewing.state).toMatchObject({ phase: 'RENEWING', held: { by: 'agent', isTold: true } })
   const renewed = decide(renewing.state, ACT + 2 * S, { kind: 'renewed', isHit: true, sentAt: ACT }, never)
@@ -206,9 +206,9 @@ test('a compaction that waits is still there after the cache was renewed', () =>
 
 test('switched off while a compaction waited, the plugin forgets it', () => {
   const waiting = decide(due(), ACT, tick('agent'), base).state
-  const off = decide(waiting, ACT + S, tick(), resolveConfig({ enabled: false }))
+  const off = decide(waiting, ACT + S, tick(), configOf({ enabled: false }))
   expect(off).toMatchObject({ state: { phase: 'WARM', held: null }, actions: [] })
-  expect(statusReport(off.state, ACT + S, resolveConfig({ enabled: false }), { contextTokens: 150000 })).not.toContain('waits')
+  expect(statusReport(off.state, ACT + S, configOf({ enabled: false }), { contextTokens: 150000 })).not.toContain('waits')
 })
 
 test('a cache that ran out for another reason is not said to have waited', () => {

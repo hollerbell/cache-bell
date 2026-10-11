@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { TTL_1H, TTL_5M } from '../../core/timing'
-import { isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript, ttlOfLine } from '../../core/transcript'
+import { hasResponse, isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript, ttlOfLine } from '../../core/transcript'
 
 // A transcript row as Claude Code 2.1.288 writes it, cut down to what matters here.
 const assistant = (short: unknown, long: unknown, extra: Record<string, unknown> = {}): string =>
@@ -46,6 +46,12 @@ test('one line names the TTL of its cache write', () => {
   for (const [name, line, ttl] of table) expect({ name, ttl: ttlOfLine(line) }).toEqual({ name, ttl })
 })
 
+test('a conversation is new while its transcript holds no response of the main thread', () => {
+  expect(hasResponse('')).toBe(false)
+  expect(hasResponse('{"type":"user"}\n{"type":"assistant","isSidechain":true}\nnot json')).toBe(false)
+  expect(hasResponse('{"type":"user"}\n{"type":"assistant","isApiErrorMessage":true}\n')).toBe(true)
+})
+
 test('the newest line that names a TTL wins', () => {
   const table: [string, string[], number | null][] = [
     ['empty text', [], null],
@@ -67,6 +73,11 @@ test('the end of a large file is read by its bytes, by the system the session ru
   expect(tailCommand('/srv/work/.claude/projects/x/s.jsonl', 65536, false)).toEqual(['tail', '-c', '65536', '/srv/work/.claude/projects/x/s.jsonl'])
   const windows = tailCommand('D:\\home\\me\\s.jsonl', 65536, true)
   expect(windows.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
+  // Named by its full path where SystemRoot is known: Claude Code may not find it by name.
+  expect(tailCommand('D:\\home\\me\\s.jsonl', 5, true, 'C:\\WINDOWS')[0]).toBe('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  expect(tailCommand('D:\\home\\me\\s.jsonl', 5, true, 'C:\\Windows\\')[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  expect(tailCommand('D:\\home\\me\\s.jsonl', 5, true, ' ')[0]).toBe('powershell')
+  expect(tailCommand('/srv/s.jsonl', 5, false, 'C:\\WINDOWS')[0]).toBe('tail')
   // It opens the file shared, jumps to the place and reads no more than it was told to.
   expect(windows[4]).toContain("[IO.File]::Open('D:\\home\\me\\s.jsonl','Open','Read','ReadWrite')")
   expect(windows[4]).toContain('[Math]::Min($f.Length,65536)')

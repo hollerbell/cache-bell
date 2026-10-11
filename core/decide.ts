@@ -77,16 +77,47 @@ const withConfig = (stored: State, config: Config): State => {
   return state
 }
 
-// The settings are only what was asked for; they never override what the API was seen to grant.
+// The settings and the default are only what was asked for; they never override what the API was seen to
+// grant: the cache written with it lives on. The plugin's own request does: it goes out with the next request,
+// whose response the transcript then shows. A model switch is only asked for too, on a cache that is cold:
+// the default given back after it replaces it.
 const acceptsTtl = (current: TtlSource, incoming: TtlSource): boolean => {
   if (current === 'config') return false
-  if (incoming === 'settings') return current === 'default' || current === 'settings'
+  if (incoming === 'default') return current !== 'transcript'
+  if (incoming === 'settings') return current === 'default' || current === 'settings' || current === 'requested'
   return true
 }
 
-// The TTL is the default's guess, and the transcript that would say could not be read: a guess is nothing
-// to renew or compact on. The session's own request is still asked about; that is not the timer's doing.
-export const isGuessed = (state: State): boolean => state.isTtlUnread && state.ttlSource === 'default'
+// Whether the person's message comes back within the hour after the plugin compacted an idle session whose
+// cache was shorter: the hour-long cache would have kept the conversation warm instead. Not after a compaction
+// for the context's size or one Claude asked for: the hour would have spared none of those.
+export const isBackWithinHour = (state: State, now: number): boolean => {
+  const done = state.lastCompaction
+  const at = done?.at
+  return done?.isIdleShort === true && at !== undefined && now >= at && now - at < TTL_1H
+}
+
+// What the cache is before the main thread's request about to go out. 'cold': nothing of it is left to read
+// (a compacted cache, another model, a cache past its whole lifetime); 'warm': it may still be read;
+// 'unknown': nothing has been seen yet, a new conversation or one resumed without a word of its past. Only on
+// a cold cache may the TTL asked for change: on a warm one, the change would write it anew. So the cache
+// counts as warm to its very end, not only to the moment the plugin acts before it, and behind a guess for
+// the hour; a clock set back leaves it warm too.
+export const cacheBefore = (state: State, now: number): 'cold' | 'warm' | 'unknown' => {
+  const rest = state.phase === 'BUSY' ? state.resumeTo : restOf(state)
+  if (rest === 'DORMANT') return 'cold'
+  if (rest === 'COLD' && state.coldReason === 'model-switch') return 'cold'
+  // A model switch or a compaction inside the turn took the anchor away.
+  if (state.anchorAt === null) return rest === 'UNKNOWN' ? 'unknown' : 'cold'
+  return now < state.anchorAt + lifeOf(state) ? 'warm' : 'cold'
+}
+
+// The TTL is a guess until a response in the transcript shows it, or the person set it in the options: the
+// default, the Claude Code settings and a model switch only say what was asked for, and the API may grant less
+// (since 2.1.293 an interactive session gets five minutes unless the hour is asked for). A guess is nothing to
+// renew or compact on: on an hour-long cache it would renew for nothing and compact early, which cannot be undone.
+// The session's own request is still asked about; that is not the timer's doing.
+export const isGuessed = (state: State): boolean => state.ttlSource !== 'transcript' && state.ttlSource !== 'config'
 
 // How long the cache is taken to live. Behind a guess it may be the hour: everything that waits for the
 // cache's end waits that long, and only what the timer would start on its own is left undone.
@@ -103,7 +134,9 @@ const COLD_WHY: Record<ColdReason, (minutes: number) => string> = {
 
 export const RENEW_FAILED = 'Renewing the prompt cache got no answer: nothing more is sent, the cache is left to expire.'
 
-export const CALLED_OFF = 'The compaction was called off: its announcement did not finish.'
+export const HOUR_NOT_GRANTED = 'Cache Bell asked for the hour-long prompt cache, but the API granted 5 minutes. The plugin goes by the 5 minutes; /bell status says more.'
+
+export const CALLED_OFF ='The compaction was called off: its announcement did not finish.'
 
 const coldText = (reason: ColdReason, ttlMs: number): string =>
   `${COLD_WHY[reason](Math.round(ttlMs / MINUTE_MS))} The next message re-sends the whole context uncached.`
@@ -168,12 +201,22 @@ const restOf = (state: State): RestPhase =>
   state.phase === 'UNKNOWN' || state.phase === 'COLD' || state.phase === 'DORMANT' ? state.phase : 'WARM'
 
 export const canRenew = (state: State, config: Config): boolean =>
-  config.renewMethod !== 'none' && state.renewals < config.maxRenewals && state.renewalsSent < RENEWALS_CAP
+  state.renewals < config.maxRenewals && state.renewalsSent < RENEWALS_CAP
 
-// What is done when nobody answers: renew while renewals are left, then compact, if the mode compacts.
+// The context size from which the session is told the person wants a compaction: what /bell set left for
+// this session, else the option's. 0 = none, and always none where the profile does not compact.
+export const levelOf = (state: State, config: Config): number =>
+  config.profile !== 'bellcompact' ? 0 : (state.levelTokens ?? config.compactAtTokens)
+
+// Whether an idle cache is compacted once the renewals are used up: idleCompact on, or auto while the cache
+// lives an hour.
+export const compacts = (state: State, config: Config): boolean =>
+  config.compact && (!config.compactHourOnly || state.ttlMs >= TTL_1H)
+
+// What is done when nobody answers: renew while renewals are left, then compact, if the profile compacts.
 export const defaultChoice = (state: State, config: Config): Choice => {
   if (canRenew(state, config)) return 'renew'
-  return config.compact ? 'compact' : 'cancel'
+  return compacts(state, config) ? 'compact' : 'cancel'
 }
 
 const cold = (state: State, coldReason: ColdReason, before: Action[] = []): Decision => ({
@@ -192,7 +235,9 @@ const act = (asked: State, choice: Choice, config: Config, extension: Extension,
   const state = { ...asked, ...UNASKED, ...UNHELD }
   const idle = (change: Partial<State>): Decision => ({ state: { ...state, phase: 'WARM', ...change }, actions: [...close, { kind: 'redraw' }] })
   if (choice === 'cancel') return idle({ isDeclined: true })
-  if (choice === 'skip') return idle({})
+  // Claude's request turned down, or left unanswered where only the person's word compacts, while an
+  // extension's question is due: that question counts as passed over, or it would follow at once.
+  if (choice === 'skip') return idle(asked.askReason === 'session' && extension.due(asked, config) !== null ? { ext: extension.passedOver(asked) } : {})
   // A compaction that waits goes on waiting through a renewal: the cache is kept warm for it.
   if (choice === 'renew') return { state: { ...state, held: asked.held, renewalsSent: asked.renewalsSent + 1, phase: 'RENEWING' }, actions: [...close, { kind: 'renew' }, { kind: 'redraw' }] }
   // An answer the core does not know is the extension's; one nobody knows does nothing.
@@ -221,8 +266,15 @@ export const fallbackOf = (state: State, config: Config, extension: Extension): 
   // Set to wait, a request nobody answered is dropped: only the person's word compacts.
   if (state.askReason === 'session') return config.sessionCompact === 'wait' ? 'skip' : 'compact'
   // A question whose extension is gone (the plugin was reloaded without it) is dropped, never acted on.
-  return extension.reasons[state.askReason]?.selected ?? 'skip'
+  const asked = extension.reasons[state.askReason]
+  if (asked === undefined) return 'skip'
+  return selectedOf(asked, config)
 }
+
+// What an extension's question opens with: where only the person's word compacts (sessionCompact = wait, or
+// a mode that never compacts on its own: notify, keep), it opens on the answer that does not.
+export const selectedOf = (asked: Extension['reasons'][string], config: Config): Choice =>
+  (config.sessionCompact === 'wait' || !config.compact) && asked.waitSelected !== undefined ? asked.waitSelected : asked.selected
 
 // Whether the next tick has to know what stands in the way of a compaction: only when one could start with
 // it, so the shell does not ask Claude Code about its subagents every second of an idle hour.
@@ -293,11 +345,12 @@ const tick = (state: State, now: number, gapMs: number, hold: Hold | null, confi
   return { state, actions: redraw }
 }
 
-// The guess ended: the TTL is known now. If that is past the time to ask, a mode that owes the question does
-// nothing more in this idle period, rather than renew or compact without having asked.
+// The guess ended: the TTL is known now. With time left for the question the next tick asks it, as after any
+// late end of a turn; without it, a mode that owes the question does nothing more in this idle period, rather
+// than renew or compact without having asked.
 const known = (before: State, after: State, now: number, config: Config): State => {
   if (!isGuessed(before) || isGuessed(after) || after.phase !== 'WARM' || after.anchorAt === null || after.held !== null) return after
-  const isLate = now >= deadlines(after.anchorAt, after.ttlMs, config.askLeadMs).tAsk
+  const isLate = now >= deadlines(after.anchorAt, after.ttlMs, config.askLeadMs).tAct - LATE_MARGIN_MS
   return isLate && planOf(after, config).asks ? { ...after, isDeclined: true } : after
 }
 
@@ -388,7 +441,7 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       if (reason === null || asked === undefined || deadline === null) return { state: rested, actions: redraw }
       return {
         state: { ...rested, phase: 'ASKING', askReason: reason, askDeadline: deadline },
-        actions: [{ kind: 'ask', reason, deadline, selected: asked.selected }, ...redraw],
+        actions: [{ kind: 'ask', reason, deadline, selected: selectedOf(asked, config) }, ...redraw],
       }
     }
 
@@ -422,6 +475,10 @@ const step = (state: State, now: number, observation: Observation, config: Confi
         : { state, actions: [] }
 
     // Taken back: nothing is asked and nothing compacted on its account, a compaction that waits included.
+    case 'level':
+      if ((state.levelTokens ?? null) === observation.levelTokens) return { state, actions: [] }
+      return { state: { ...state, levelTokens: observation.levelTokens }, actions: redraw }
+
     case 'withdrawn':
       if (!state.isRequested && state.held === null) return { state, actions: [] }
       return { state: { ...state, isRequested: false, requestMs: null, held: null }, actions: state.held === null ? [] : redraw }
@@ -445,7 +502,10 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       const drawn = read === state ? [] : redraw
       if (!acceptsTtl(read.ttlSource, observation.source)) return { state: known(state, read, now, config), actions: drawn }
       if (read.ttlMs === observation.ttlMs && read.ttlSource === observation.source) return { state: known(state, read, now, config), actions: drawn }
-      return { state: known(state, { ...read, ttlMs: observation.ttlMs, ttlSource: observation.source }, now, config), actions: redraw }
+      // The plugin asked for the hour and a response shows less: said once, when the transcript says so.
+      const isRefused = read.ttlSource === 'requested' && read.ttlMs === TTL_1H && observation.source === 'transcript' && observation.ttlMs < TTL_1H
+      const told: Action[] = isRefused ? [{ kind: 'notify', text: HOUR_NOT_GRANTED }] : []
+      return { state: known(state, { ...read, ttlMs: observation.ttlMs, ttlSource: observation.source }, now, config), actions: [...told, ...redraw] }
     }
 
     case 'ttl-unread':
@@ -466,11 +526,19 @@ const step = (state: State, now: number, observation: Observation, config: Confi
     case 'compacted': {
       // After a compaction the cached prefix is the old conversation: nothing here is worth keeping warm
       // until real work resumes. One that ran inside a turn leaves the turn running.
-      const compacted = { ...state, ...FRESH, ...UNASKED, ...UNHELD, isRequested: false, requestMs: null, anchorAt: null, coldReason: null, contextTokens: null, ext: extension.reset(state.ext, 'compacted') }
+      // One compaction reaches the plugin up to three times (its own run, the hook, the SessionStart after it).
+      // A report without the size after it, with nothing seen since the last, keeps what the last one left.
+      const tokensAfter = observation.own?.after ?? observation.tokensAfter ?? null
+      const isEcho = tokensAfter === null && state.anchorAt === null && state.contextTokens === null
+      const ext = isEcho ? state.ext : extension.reset(state.ext, 'compacted', tokensAfter)
+      const compacted = { ...state, ...FRESH, ...UNASKED, ...UNHELD, isRequested: false, requestMs: null, anchorAt: null, coldReason: null, contextTokens: null, ext }
       if (state.phase === 'BUSY') return { state: { ...compacted, resumeTo: 'DORMANT' }, actions: redraw }
       // The plugin's own compaction is said in the band until the next turn: who comes back sees what was done.
       const own = observation.own
-      const lastCompaction = own === undefined ? state.lastCompaction : { ...own, idleMs: state.workedAt === null ? null : now - state.workedAt }
+      const lastCompaction =
+        own === undefined
+          ? state.lastCompaction
+          : { before: own.before, after: own.after, idleMs: state.workedAt === null ? null : now - state.workedAt, at: now, isIdleShort: own.isIdle === true && state.ttlMs < TTL_1H }
       return { state: { ...compacted, lastCompaction, phase: 'DORMANT', resumeTo: null }, actions: [...close, ...redraw] }
     }
 
@@ -486,7 +554,7 @@ const step = (state: State, now: number, observation: Observation, config: Confi
 
     case 'cleared':
       return {
-        state: { ...state, ...FRESH, ...UNASKED, ...UNHELD, lastCompaction: null, phase: 'UNKNOWN', anchorAt: null, coldReason: null, resumeTo: null, contextTokens: null, ext: extension.reset(state.ext, 'cleared'), isRequested: false, requestMs: null },
+        state: { ...state, ...FRESH, ...UNASKED, ...UNHELD, lastCompaction: null, phase: 'UNKNOWN', anchorAt: null, coldReason: null, resumeTo: null, contextTokens: null, ext: extension.reset(state.ext, 'cleared', null), isRequested: false, requestMs: null },
         actions: [...close, ...redraw],
       }
   }
