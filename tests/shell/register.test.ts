@@ -3367,7 +3367,7 @@ test('the person who writes during the countdown takes the request back, and its
   expect(wakes(seen)).toEqual([])
 })
 
-test('three compactions in a row are followed by a note; then the person has to write', { options: { compactCountdown: 30 } }, async ($, on) => {
+test('three compactions in a row are followed by a note; then the person has to write', { options: { compactCountdown: 30, compactNotesInRow: 3 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
@@ -3391,6 +3391,24 @@ test('three compactions in a row are followed by a note; then the person has to 
   await clock.settle()
   expect(wakes(seen).length).toBe(4)
 })
+
+for (const [name, options, rounds] of [['five by default', {}, 5], ['any number with the limit off', { compactNotesInRow: 0 }, 7]] as const) {
+  test(`notes in a row: ${name}`, { options: { compactCountdown: 30, ...options }, timeoutMs: LONG }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    for (let round = 0; round < rounds; round++) {
+      expect(await askingWith($, clock, `Round ${round}.`, round === 0)).toMatch(/you are sent your note/)
+      await clock.advance(32 * S)
+      await clock.settle()
+    }
+    expect(wakes(seen).length).toBe(rounds)
+    const next = await askingWith($, clock, 'One more.', false)
+    if (rounds === 5) expect(next).toMatch(/Your note will not be sent: 5 compactions in a row/)
+    else expect(next).toMatch(/you are sent your note/)
+  })
+}
 
 test('a compaction that fails, or one the person calls off, is followed by no note', { options: { compactCountdown: 30 }, timeoutMs: LONG }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })

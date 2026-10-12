@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKES_MAX, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
+import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, mayWake, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
 import type { AskStyle, Choice, ChoiceText, Wake } from '../core/ask'
 import { resolveConfig, unknownWords } from '../core/config'
 import { cacheBefore, decide, fallbackOf, initialState, isBackWithinHour, levelOf, needsHold } from '../core/decide'
@@ -1444,7 +1444,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       // `then` is what the parameter was called before 0.2.7: a session that read the older skill still passes it.
       const wanted = wakeOf(asked.resumeWith) || wakeOf(asked.then)
       if (wanted !== '') {
-        wakeText = wakesInRow < WAKES_MAX ? wanted : ''
+        wakeText = mayWake(wakesInRow, config.wakesMax) ? wanted : ''
         wakes = wakeText !== '' ? 'kept' : 'capped'
       } else if (wakeText !== '') wakes = 'kept'
       await observe($, config, { kind: 'requested', countdownMs })
@@ -1457,7 +1457,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     }
     // What the core took: a second request in one turn changes nothing, its countdown included.
     const taken = (await read($, machine))?.requestMs ?? config.compactCountdownMs
-    return { result: requestAnswer(config.sessionCompact, isWatching && config.enabled, taken, wakes) }
+    return { result: requestAnswer(config.sessionCompact, isWatching && config.enabled, taken, wakes, config.wakesMax) }
   })
 
   // Any other tool of the main thread: its result may carry a line on how full the context is. With both

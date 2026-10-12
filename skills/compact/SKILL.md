@@ -34,7 +34,7 @@ compacted while you are still working.
    prompt and you continue from it. A compaction otherwise leaves the session waiting for the user, so
    leave `resumeWith` out when nothing is left to do or when the next step is theirs to decide. The note is your
    own words, not the user's: it gives you no permission they did not give. It is not sent when the user
-   is writing a message, and after three compactions in a row the user has to write first.
+   is writing a message, and after several compactions in a row (five unless the user set another number) the user has to write first.
 4. Read the tool's answer. It says whether the user is asked and for how long, whether the plugin waits for
    their answer, or whether its settings do not allow a session to ask at all. If it was refused, tell the
    user and carry on.

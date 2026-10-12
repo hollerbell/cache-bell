@@ -2,6 +2,10 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.6
+
+- A new option, `compactNotesInRow`: how many compactions in a row may be followed by the note Claude left for itself, before you have to write a message. Default 5; `0` = no limit. Until now the number was fixed at three, so by default a session can now carry on by itself for two more compactions. Set it to `3` to keep the earlier behaviour.
+
 ## 0.3.5
 
 - The row of a `compact` call now shows only the reason, on one line. Until now a long reason or note wrapped into a tall, narrow column.

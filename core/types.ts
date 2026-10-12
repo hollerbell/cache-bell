@@ -94,6 +94,9 @@ export type Config = {
   contextNotices: boolean
   // how long a question that does not wait for the cache (one the session asked for, an extension's) waits
   compactCountdownMs: number
+  // how many compactions in a row may be followed by the session's note with no message from the person
+  // between them; 0 = no limit
+  wakesMax: number
   // how long before the time to act the cache question appears; 0 = automatic
   askLeadMs: number
   // what a compaction the session asked for does: ask and compact when the countdown ends, ask and wait

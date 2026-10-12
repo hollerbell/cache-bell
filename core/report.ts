@@ -156,6 +156,7 @@ export const problemReport = (state: State, now: number, config: Config, facts: 
       `compactContextNotices ${config.contextNotices}`,
       `compactOnRequest ${config.sessionCompact}`,
       `compactCountdown ${config.compactCountdownMs / 1000}`,
+      `compactNotesInRow ${config.wakesMax}`,
       `idleMinContextK ${config.minContextTokens / 1000}`,
       `idleAsk ${config.ask}`,
       `idleAskAheadMinutes ${config.askLeadMs / MINUTE_MS}`,

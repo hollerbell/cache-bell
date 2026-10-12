@@ -177,9 +177,10 @@ export const withdrawAnswer = (hadRequest: boolean): string =>
 // session may say what it wants to be told once the compaction is done, and the plugin sends that as a prompt
 // of its own. Only the session's own request is followed so; a compaction the timers bring wakes nobody.
 export const WAKE_MAX_CHARS = 2000
-// So many compactions in a row may be followed by a prompt with no message from the person between them:
-// a session that asks again in the turn it was woken into must not go round for ever.
-export const WAKES_MAX = 3
+// Only so many compactions in a row (compactNotesInRow) are followed by a prompt with no message from the
+// person between them: a session that asks again in the turn it was woken into must not go round for ever.
+// 0 = the person took the limit off.
+export const mayWake = (inRow: number, max: number): boolean => max === 0 || inRow < max
 
 // What the session passed as `resumeWith`, as it is kept: text only, trimmed and bounded. '' = no prompt wanted.
 export const wakeOf = (passed: unknown): string => (typeof passed === 'string' ? passed.trim().slice(0, WAKE_MAX_CHARS) : '')
@@ -198,14 +199,15 @@ export const WAKE_TYPING = 'the prompt holds a message being written, the note l
 // What becomes of the note: none was passed, it is kept for after the compaction, or it is left out.
 export type Wake = 'none' | 'kept' | 'capped'
 
-const WAKE_ANSWER: Record<Wake, string> = {
-  none: '',
-  kept: ' Once the compaction is done you are sent your note as a prompt and go on from it, unless the user is writing a message of their own.',
-  capped: ` Your note will not be sent: ${WAKES_MAX} compactions in a row were already followed by one, and the user has to write first. After the compaction the session waits for them.`,
-}
+const wakeAnswer = (wake: Wake, max: number): string =>
+  ({
+    none: '',
+    kept: ' Once the compaction is done you are sent your note as a prompt and go on from it, unless the user is writing a message of their own.',
+    capped: ` Your note will not be sent: ${max} compactions in a row were already followed by one, and the user has to write first. After the compaction the session waits for them.`,
+  })[wake]
 
 // What the session's tool answers, for Claude to read.
-export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number, wake: Wake = 'none'): string => {
+export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean, countdownMs: number, wake: Wake = 'none', wakesMax = 0): string => {
   if (mode === 'off' || !isEnabled) {
     return 'Refused: Cache Bell is set not to compact at a session\'s request. Tell the user; they can compact with /compact.'
   }
@@ -214,5 +216,5 @@ export const requestAnswer = (mode: Config['sessionCompact'], isEnabled: boolean
     wait: 'When this turn ends the user is asked; this request compacts the conversation only if they say so.',
     confirm: `When this turn ends the user is asked and has up to ${Math.round(countdownMs / 1000)} seconds to cancel; without an answer the conversation is compacted.`,
   }[mode]
-  return `Compaction requested. ${when}${WAKE_ANSWER[wake]} End this turn now and call no more tools.`
+  return `Compaction requested. ${when}${wakeAnswer(wake, wakesMax)} End this turn now and call no more tools.`
 }

@@ -21,6 +21,7 @@ test('with no options the plugin runs the bellcompact profile', () => {
     compactAtTokens: 200000,
     contextNotices: true,
     compactCountdownMs: 30000,
+    wakesMax: 5,
     askLeadMs: 0,
     sessionCompact: 'confirm',
     display: 'status',
@@ -109,6 +110,10 @@ test('a value that makes no sense falls back to its default', () => {
     ['a countdown too short', { compactCountdown: 4 }, { compactCountdownMs: 30000 }],
     ['the longest countdown', { compactCountdown: 3600 }, { compactCountdownMs: 3600000 }],
     ['a countdown too long', { compactCountdown: 3601 }, { compactCountdownMs: 30000 }],
+    ['three notes in a row', { compactNotesInRow: 3 }, { wakesMax: 3 }],
+    ['notes without a limit', { compactNotesInRow: 0 }, { wakesMax: 0 }],
+    ['a negative number of notes', { compactNotesInRow: -1 }, { wakesMax: 5 }],
+    ['notes above the bound', { compactNotesInRow: 1001 }, { wakesMax: 5 }],
     ['ask ten minutes ahead', { idleAskAheadMinutes: 10 }, { askLeadMs: 600000 }],
     ['a negative lead', { idleAskAheadMinutes: -1 }, { askLeadMs: 0 }],
     ['the longest lead', { idleAskAheadMinutes: 600 }, { askLeadMs: 36000000 }],
@@ -143,7 +148,7 @@ test('the table of defaults is what the configuration resolves to with nothing s
   expect(resolveConfig(OPTION_DEFAULTS)).toEqual(resolveConfig({}))
   // Each of them is really read: another value changes what is resolved.
   const other: Record<string, unknown> = {
-    enabled: false, profile: 'watch', compactLevelK: 300, compactContextNotices: false, compactOnRequest: 'off', compactCountdown: 77,
+    enabled: false, profile: 'watch', compactLevelK: 300, compactContextNotices: false, compactOnRequest: 'off', compactCountdown: 77, compactNotesInRow: 9,
     compactInstructions: 'z', idleMinContextK: 5, idleAsk: 'never', idleAskAheadMinutes: 9, idleRenewals: 1,
     idleRenewPrompt: 'y', idleCompact: 'on', idleAnnounce: false, idleAnnouncePrompt: 'x', cacheTtl: '1h',
     cacheRequestHour: 'on', display: 'off', displayBelowMinutes: 7,
