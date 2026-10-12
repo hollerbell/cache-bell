@@ -53,6 +53,8 @@ type Seen = {
   envAsked: string[]
   // what the plugin wrote into the environment: 'NAME=value', or 'NAME unset'
   envSet: string[]
+  // The input each tool call's row was drawn with.
+  rows: unknown[]
   toasts: string[]
   commands: string[]
   processes: number
@@ -70,7 +72,7 @@ const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, transcript = ASSISTANT_5M, size = 100): Seen => {
-  const seen: Seen = { envAsked: [], envSet: [], toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map<string, unknown>([['intro', 2]]) }
+  const seen: Seen = { envAsked: [], envSet: [], rows: [], toasts: [], commands: [], processes: 0, argv: [], statuses: [], logs: [], fills: [], did: [], store: new Map<string, unknown>([['intro', 2]]) }
   answers.tailExit = 0
   answers.grown = 0
   answers.appended = ''
@@ -245,7 +247,10 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
     if (answers.isCompactBroken) throw new Error('overloaded')
     return answers.compactSkip ? { skip: 'a hook said no' } : { messages: SUMMARY, tokensBefore: answers.tokens, tokensAfter: 21400 }
   })
-  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+  on('ui.render', (_, e) => {
+    if (e.component === 'ToolUse') seen.rows.push((e.props as { input: unknown }).input)
+    return { type: 'Text', props: {}, children: ['drawn by Claude Code'] }
+  })
   return seen
 }
 
@@ -2439,7 +2444,7 @@ test('the question swings between the ambers for a light background', async ($, 
 // Announces and compacts at the time to act, with no question and no renewal.
 const ANNOUNCE = { idleAsk: 'never', idleRenewals: 0, idleAnnounce: true, idleCompact: 'on' }
 
-test('an announcement the person interrupts is not followed by a compaction', { options: ANNOUNCE }, async ($, on) => {
+test('an announcement the person interrupts is not followed by a compaction', { options: ANNOUNCE, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
   await clock.advance(240 * S)
   expect(seen.did).toEqual(['prepare'])
@@ -3519,4 +3524,26 @@ test('the report says on which surfaces the band was asked for and drawn, and wh
   expect(count(after, 'drawn', 'desktop')).toBe(count(before, 'drawn', 'desktop') + 1)
   expect(after).toMatch(/seen: [^·]*mobile attached, mobile left$/m)
   expect(after).not.toContain('jane')
+})
+
+// What Claude Code passes for the row of a tool call.
+const toolUse = (tool: string, input: unknown, surface: 'terminal' | 'desktop' = 'terminal') => ({
+  plugin: 'cache-bell',
+  component: 'ToolUse' as const,
+  requestId: 'toolu_1',
+  surface,
+  viewport: { columns: 80, rows: 30 },
+  props: { tool_use_id: 'toolu_1', tool, input, isRunning: false, isErrored: false, isInterrupted: false },
+})
+
+test('the row of a compact call is drawn with the reason alone; other tools and the desktop app are left as they are', async ($, on) => {
+  mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const input = { reason: 'Done.', resumeWith: 'Go on with the tests. '.repeat(40), countdown: 30 }
+  for (const row of [toolUse('mcp__cache-bell__compact', input), toolUse('Bash', input), toolUse('mcp__cache-bell__compact', input, 'desktop')]) {
+    const ui = await $.ui.mount(row as never)
+    await ui.unmount()
+  }
+  expect(seen.rows).toEqual([{ reason: 'Done.' }, input, input])
 })

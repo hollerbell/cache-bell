@@ -326,6 +326,20 @@ const HOUR_HINT = '/bell hour on|off changes it later'
 // What the hour costs, stated wherever the plugin asks about it.
 export const HOUR_PRICE = 'on the API, writing to an hour-long cache costs twice the base input price, against 1.25 times for a five-minute one; reading costs the same for both. How this counts toward Pro, Max or Team limits is not published'
 
+// What the row of a call of the compact tool draws: the reason alone, on one line. The terminal sets a call's
+// input behind the opening bracket and wraps a long value there into a tall, narrow column, and resumeWith may
+// run to 2000 characters. The model got the whole input; this is only what the row shows.
+export const COMPACT_TOOL = `mcp__${PLUGIN}__compact`
+const ROW_HEAD = `● ${PLUGIN} - compact (MCP)(reason: "")`
+export const compactRowInput = (input: unknown, columns: number): Record<string, unknown> => {
+  const given = (input ?? {}) as { reason?: unknown; cancel?: unknown }
+  if (given.cancel === true) return { cancel: true }
+  if (typeof given.reason !== 'string') return {}
+  const room = Math.max(12, columns - ROW_HEAD.length - 1)
+  const chars = Array.from(given.reason.replace(/\s+/g, ' ').trim())
+  return { reason: chars.length <= room ? chars.join('') : `${chars.slice(0, room - 1).join('')}…` }
+}
+
 // Whether Claude is told to compact past the level of the options, which 0.2.x never did by default.
 export const compactsAtLevel = (config: Config): boolean => config.compactAtTokens > 0 && config.sessionCompact !== 'off'
 

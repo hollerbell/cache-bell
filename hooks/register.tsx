@@ -21,7 +21,7 @@ import { digestOf, errorCode, noticeHead, problemReport } from '../core/report'
 import type { Digest, SurfaceChange } from '../core/report'
 import { hasResponse, isSamePath, lastRequestOf, tailCommand, transcriptPathOf, ttlFromTranscript } from '../core/transcript'
 import type { Action, AskReason, Config, Hold, Observation, State } from '../core/types'
-import { BAND_PREFIX, HOUR_KEY, HOUR_SECOND_KEY, INTRO_KEY, INTRO_SEEN, INTRO_SEEN_BEFORE_HOUR, MARK, RHYTHM_KEY, PALETTE, PLUGIN, band, compactsAtLevel, introOf, isHourAnswer, lookOf, sampleBand, secondChanceOf, statusEntry, statusReport, versionOf } from '../core/view'
+import { BAND_PREFIX, COMPACT_TOOL, HOUR_KEY, HOUR_SECOND_KEY, INTRO_KEY, INTRO_SEEN, INTRO_SEEN_BEFORE_HOUR, MARK, RHYTHM_KEY, PALETTE, PLUGIN, band, compactRowInput, compactsAtLevel, introOf, isHourAnswer, lookOf, sampleBand, secondChanceOf, statusEntry, statusReport, versionOf } from '../core/view'
 import type { Band, HourAnswer, HourState, Intro, IntroChoice, Look } from '../core/view'
 
 const machine = atom({ plugin: 'cache-bell', key: 'machine' } as const, null)
@@ -1692,6 +1692,12 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('classic.PostModelSwitch', async ($, e, next) => {
     if (isWatching) await observe($, config, { kind: 'model-switch', ttlMs: parseTtl(e.cache_ttl) })
     return next(e)
+  })
+
+  // The row of a compact call shows the reason alone, on one line (compactRowInput).
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.tool !== COMPACT_TOOL) return next(e)
+    return next({ ...e, props: { ...e.props, input: compactRowInput(e.props.input, e.viewport?.columns ?? 80) } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

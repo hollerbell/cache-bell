@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.3.4](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 393 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.3.5](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 395 passing](docs/badge-tests.svg)
 
 **A cache & context manager for Claude Code.** Once the context passes a size you choose, Claude compacts
 after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt
@@ -70,7 +70,7 @@ your plan. With `cache-bell.profile` = `watch` nothing is sent and Claude is tol
   an hour-long cache expires, and a compaction cannot be undone. If you follow sessions over Remote
   Control, set `cache-bell.compactOnRequest` to `wait` and `cache-bell.idleCompact` to `off`: then nothing
   is compacted without your answer. With `cache-bell.profile` = `watch` nothing is sent at all.
-- 0.3.4 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
+- 0.3.5 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
   plugin does nothing, except that it removes the hour-long cache setting it inherited from the plugin.
 - Coming from 0.2.x: the options have new names, and Claude now compacts by itself past 200K. See
   [CHANGELOG.md](CHANGELOG.md) for what was taken over and how to keep the behaviour of 0.2.13.
@@ -107,7 +107,7 @@ automatically: see [Update](#update).
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.3.4, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
+0.3.5, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
 uses the mods API, which is early access and changes between releases). Tested on Windows and macOS, in
 the terminal; Linux is not tested yet. Before you rely on it, read [the points above](#before-you-rely-on-it).
 
@@ -486,6 +486,9 @@ What it reads:
   way is read within the same limits as one Claude Code names. `cacheTtl` = `settings` stops the look-up
   as well: the plugin then neither looks for the file nor reads these variables;
 - the cache TTL Claude Code reports when you switch the model;
+- the rows of tool calls that Claude Code draws in the terminal: the tool's name and, for the plugin's own
+  `compact` tool, the reason given and whether the call cancels a request, to shorten that tool's row (see
+  "What it hooks" below);
 - its own manifest (`plugin.json`), for the version `/bell status` shows;
 - one value another plugin may keep in the session's state: whether the plugin built on this one
   (`holler-bell`) runs in the session. When it does, Cache Bell stands down: it shows nothing, asks nothing
@@ -557,7 +560,7 @@ your value is never mistaken for its own.
 
 What it hooks. It serves two things of its own through hooks: the command `/bell` (a hook on
 `command.run`, for that command only) and the tool `compact`, which it registers itself (a hook on
-`tool.call`, for that tool only; the hook answers in the tool's place, since the tool has no other code). It has a second hook on `tool.call`, for the tools of the main conversation: it lets the tool run, leaves its result as it is and adds the line for Claude described above. It reads the tool's name, whether a subagent called it, and the size of the context, not what the tool was given. For subagents and for its own `compact` tool it passes the call on unchanged; with `compactContextNotices` off and either no level or `compactOnRequest` = `off` it passes every call on unchanged and reads nothing. Two more hooks on `tool.call`, for the tools `Bash` and `PowerShell` only, take the hour out of the environment while the command runs, as said above; they pass the call on unchanged and read only whether a subagent made the call and whether a subagent is running, nothing of the command itself.
+`tool.call`, for that tool only; the hook answers in the tool's place, since the tool has no other code). It has a second hook on `tool.call`, for the tools of the main conversation: it lets the tool run, leaves its result as it is and adds the line for Claude described above. It reads the tool's name, whether a subagent called it, and the size of the context, not what the tool was given. For subagents and for its own `compact` tool it passes the call on unchanged; with `compactContextNotices` off and either no level or `compactOnRequest` = `off` it passes every call on unchanged and reads nothing. Two more hooks on `tool.call`, for the tools `Bash` and `PowerShell` only, take the hour out of the environment while the command runs, as said above; they pass the call on unchanged and read only whether a subagent made the call and whether a subagent is running, nothing of the command itself. A hook on `ui.render`, for the rows of tool calls in the terminal, shortens the row of the plugin's own `compact` tool to the reason, on one line. Claude Code hands it every such row, with the tool's name and input. It reads the name and, for its own tool only, the reason given and whether the call cancels a request; it reads nothing else of any row, keeps nothing and sends nothing. It changes only what the row shows, not what Claude sent, and passes every other row on unchanged.
 It answers no other command and no other tool, and takes no permission decision. Its other hooks on events
 that are also calls: `prompt.submit`, for the messages that are sent, and `session.append`, for the two
 notices in the transcript, both as said above; `config.set`, for the theme only, passed on unchanged;

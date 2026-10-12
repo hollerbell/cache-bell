@@ -2,6 +2,10 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.5
+
+- The row of a `compact` call now shows only the reason, on one line. Until now a long reason or note wrapped into a tall, narrow column.
+
 ## 0.3.4
 
 This version renames and regroups the options of 0.2.x (see "Options of 0.2.13" below). If you ran 0.2.13 with its default options, Claude now compacts the conversation by itself once the context passes 200K, at a good moment, without asking you first. With the default settings you still get a 30-second countdown to cancel: while you type it waits, and sending a message cancels it. To keep 0.2.13's behaviour, set `compactLevelK` to 0, `idleCompact` to `on` and `idleMinContextK` to 100, and set up the display as described under "Countdown in the status line" below. To keep only the warnings, set `profile` to `watch`.

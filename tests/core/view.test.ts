@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { decide, initialState } from '../../core/decide'
 import { TTL_1H, TTL_5M } from '../../core/timing'
 import type { State } from '../../core/types'
-import { PALETTE, UNNAMED, UNREAD, UNSEEN, band, compactedText, formatIdle, hourRow, introOf, formatLeft, formatCount, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
+import { PALETTE, UNNAMED, UNREAD, UNSEEN, band, compactRowInput, compactedText, formatIdle, hourRow, introOf, formatLeft, formatCount, formatTtl, lookOf, resent, statusEntry, statusReport, versionOf } from '../../core/view'
 import type { HourState } from '../../core/view'
 import { COMPACT_ONLY, KEEP, NOTIFY, configOf } from './options'
 
@@ -403,4 +403,19 @@ test('the status report ends with what it is told of options set to a word they 
   const said = 'ttl is set to "10m", which is not one of auto, 5m, 1h; the default, auto, is used'
   expect(statusReport(warm(), T0, config, { contextTokens: 1, unknown: [said] }).split('\n').at(-1)).toBe(said)
   expect(statusReport(warm(), T0, config, { contextTokens: 1, unknown: [] })).not.toContain('is set to')
+})
+
+test('the row of a compact call shows the reason alone, cut to what is left of the line', () => {
+  const long = 'The work on the review is done and its fixes are pushed, so the conversation can be compacted now.'
+  // `● cache-bell - compact (MCP)(reason: "")` takes 40 columns, one more stays free.
+  expect(compactRowInput({ reason: 'Done.', resumeWith: 'x'.repeat(2000), countdown: 30 }, 80)).toEqual({ reason: 'Done.' })
+  const cut = compactRowInput({ reason: long }, 80).reason as string
+  expect(cut).toBe(`${long.slice(0, 38)}…`)
+  expect(cut.length).toBe(39)
+  // A reason over several lines is one line; a narrow window still leaves 12 characters.
+  expect(compactRowInput({ reason: 'One.\n  Two.' }, 80)).toEqual({ reason: 'One. Two.' })
+  expect((compactRowInput({ reason: long }, 20).reason as string).length).toBe(12)
+  expect(compactRowInput({ cancel: true, reason: 'no' }, 80)).toEqual({ cancel: true })
+  expect(compactRowInput({ userAsked: true }, 80)).toEqual({})
+  expect(compactRowInput(undefined, 80)).toEqual({})
 })
