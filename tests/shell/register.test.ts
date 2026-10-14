@@ -2283,6 +2283,63 @@ test('the log tells the person who said yes from the timer, and keeps a /compact
   expect(((await run($, 'log 2')).text ?? '').split('\n').length).toBe(3)
 })
 
+test("Claude Code's own idle compaction is held between turns and asked about; the one in a turn goes ahead", async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(60 * S)
+  // Between turns, 'auto' with no instructions at all: Claude Code's compaction of an idle session.
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toEqual({ skip: "Cache Bell looks after this idle session's cache" })
+  expect(logged(seen)).toEqual([])
+  // Nothing was offered in this idle period yet: the question comes now, with what the timer would do.
+  expect(await question($)).toMatchObject({ selected: ['[2] >Renew cache<'] })
+  // Asked once: held again, nothing is asked a second time.
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  // Empty instructions are the same compaction as none.
+  expect(await $.session.compact({ trigger: 'auto', instructions: '', messages: SUMMARY })).toEqual({ skip: "Cache Bell looks after this idle session's cache" })
+  expect(await bandText($)).toMatch(/^h⣿ Cache Bell: prompt cache expires in \d+:\d\d\s*$/)
+
+  // In a turn it is the compaction for the context's size, and Claude Code's to run.
+  await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: 'hi', turnId: 't' })
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toMatchObject({ tokensAfter: 21400 })
+  expect(logged(seen)).toMatchObject([{ why: 'auto', by: 'claude-code' }])
+})
+
+// Every one of these is a compaction the plugin does not hold, though the session is idle: a subagent's,
+// one with instructions (the person's /compact, an instructed one), the person's own, and any where the
+// plugin only watches.
+const NOT_HELD: [string, Record<string, unknown>, Record<string, unknown>][] = [
+  ["a subagent's", { trigger: 'auto', agentId: 'a1' }, {}],
+  ['one with instructions', { trigger: 'auto', instructions: 'Keep the file paths.' }, {}],
+  ["the person's /compact", { trigger: 'manual' }, {}],
+  ['one where the plugin only watches', { trigger: 'auto' }, { profile: 'watch' }],
+]
+for (const [name, e, options] of NOT_HELD) {
+  test(`between turns, ${name} compaction goes ahead`, { options }, async ($, on) => {
+    const { clock } = await idle($, on)
+    await clock.advance(60 * S)
+    expect(await $.session.compact({ ...e, messages: SUMMARY } as never)).toMatchObject({ tokensAfter: 21400 })
+  })
+}
+
+test('a compaction for the size that comes after the message is sent, before its turn starts, goes ahead', async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(60 * S)
+  await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'composer' } })
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toMatchObject({ tokensAfter: 21400 })
+  expect(logged(seen)).toMatchObject([{ why: 'auto', by: 'claude-code' }])
+})
+
+test("after Let it expire Claude Code's idle compaction is held, and the cache is left to expire", async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(60 * S)
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toEqual({ skip: "Cache Bell looks after this idle session's cache" })
+  await edit($, '', 0, 0, '3')
+  await enter($, '3')
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toEqual({ skip: "Cache Bell looks after this idle session's cache" })
+  expect(seen.did).toEqual([])
+})
+
 test('the person can drop what the session asked for', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)

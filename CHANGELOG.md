@@ -2,6 +2,10 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.7
+
+- Recent versions of Claude Code compact an idle session by themselves shortly before an hour-long cache expires, once it is above roughly 200k tokens. While Cache Bell looks after idle sessions (`profile` `bellcompact`), it now stops that compaction and goes on as it is set to: it asks, renews or compacts. If it has not asked yet in this idle period, it asks right away, unless `idleAsk` is `never`. Until now that compaction went ahead, even when you had chosen Renew. With `profile` `watch` or `off`, or below `idleMinContextK`, the plugin lets it go ahead. To turn it off in Claude Code itself, set `idleCompaction` to `false` in Claude Code's settings.
+
 ## 0.3.6
 
 - A new option, `compactNotesInRow`: how many compactions in a row may be followed by the note Claude left for itself, before you have to write a message. Default 5; `0` = no limit. Until now the number was fixed at three, so by default a session can now carry on by itself for two more compactions. Set it to `3` to keep the earlier behaviour.

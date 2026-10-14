@@ -17,7 +17,7 @@ export const ASK_GRACE_MS = 3000
 // given up: a reload in the middle of one leaves nobody to report its end.
 export const WORK_GRACE_MS = 10 * MINUTE_MS
 
-const FRESH = { renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, retryAt: null } as const
+const FRESH = { renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, isLetExpire: false, retryAt: null } as const
 // No question is open.
 const UNASKED = { askReason: null, askDeadline: null } as const
 // No compaction waits and none was ordered by the person.
@@ -219,6 +219,27 @@ export const defaultChoice = (state: State, config: Config): Choice => {
   return compacts(state, config) ? 'compact' : 'cancel'
 }
 
+// Whether Claude Code's own compaction of an idle session (an hour-long cache, at nine tenths of it) is held
+// back. It comes between turns, so a compaction while a turn runs is the one for the context's size and goes
+// ahead. Held only where the plugin looks after this idle period itself and will see it through: the person's
+// answer, or the course they set, decides what happens to the cache, not Claude Code's timer. It goes ahead
+// where the plugin does nothing about an idle cache (switched off, a profile that does not compact, a small
+// context), where the TTL is only a guess (the timer does nothing on one, so the cache would run out unseen),
+// and where the plugin gave up on this idle period by itself (a renewal that failed, a step refused).
+// Whether a compaction that reaches the hook may be Claude Code's own of an idle session: 'auto' with no
+// instructions at all, of the main conversation, between turns. Never the plugin's own, whatever it comes as,
+// and never one while a turn is open or a message is on its way to open one: that one is for the context's
+// size, and holding it back would leave the request too long to send.
+export const isBuiltinIdle = (e: { trigger?: string; agentId?: string; instructions?: string }, isOwn: boolean, isTurnOpen: boolean): boolean =>
+  !isOwn && !isTurnOpen && e.trigger === 'auto' && e.agentId === undefined && (e.instructions === undefined || e.instructions === '')
+
+export const holdsBuiltinIdle = (state: State, config: Config): boolean => {
+  if (!config.enabled || config.profile !== 'bellcompact' || isGuessed(state)) return false
+  if (state.phase !== 'WARM' && state.phase !== 'ASKING' && state.phase !== 'RENEWING' && state.phase !== 'COMPACTING') return false
+  if (state.contextTokens !== null && state.contextTokens < config.minContextTokens) return false
+  return !state.isDeclined || state.isLetExpire === true
+}
+
 const cold = (state: State, coldReason: ColdReason, before: Action[] = []): Decision => ({
   state: { ...state, ...UNASKED, ...UNHELD, phase: 'COLD', coldReason },
   actions: [...before, { kind: 'notify', text: coldText(coldReason, lifeOf(state)) }, { kind: 'redraw' }],
@@ -234,7 +255,7 @@ const act = (asked: State, choice: Choice, config: Config, extension: Extension,
   const close: Action[] = asked.phase === 'ASKING' ? [{ kind: 'close-question' }] : []
   const state = { ...asked, ...UNASKED, ...UNHELD }
   const idle = (change: Partial<State>): Decision => ({ state: { ...state, phase: 'WARM', ...change }, actions: [...close, { kind: 'redraw' }] })
-  if (choice === 'cancel') return idle({ isDeclined: true })
+  if (choice === 'cancel') return idle({ isDeclined: true, isLetExpire: true })
   // Claude's request turned down, or left unanswered where only the person's word compacts, while an
   // extension's question is due: that question counts as passed over, or it would follow at once.
   if (choice === 'skip') return idle(asked.askReason === 'session' && extension.due(asked, config) !== null ? { ext: extension.passedOver(asked) } : {})
@@ -550,6 +571,22 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       // A cache that ran out while the session was closed is cold without a word: nobody was waiting.
       if (isPastMax(resumed, now)) return { state: { ...resumed, phase: 'COLD', coldReason: 'expired' }, actions: redraw }
       return { state: { ...resumed, phase: 'WARM', coldReason: null }, actions: redraw }
+    }
+
+    // Held back by the shell. The question of this idle period was mostly asked by then; where nothing was
+    // offered yet (a TTL the plugin only guessed, a question something else interrupted), it is asked now, so
+    // nothing is held without the person having their say. Never a second time, and never where the person
+    // set the plugin to act without asking.
+    case 'builtin-idle': {
+      if (state.phase !== 'WARM' || state.isAsked || state.isDeclined || state.held !== null || config.ask === 'never' || state.anchorAt === null) return { state, actions: [] }
+      const { tAct } = deadlines(state.anchorAt, lifeOf(state), config.askLeadMs)
+      // Too late for one: the timer acts at its next tick, as it would have without Claude Code's compaction.
+      const deadline = now < tAct - LATE_MARGIN_MS ? tAct : askUntil(state, now, config.compactCountdownMs)
+      if (deadline === null) return { state, actions: [] }
+      return {
+        state: { ...state, phase: 'ASKING', isAsked: true, askReason: 'cache', askDeadline: deadline },
+        actions: [{ kind: 'ask', reason: 'cache', deadline, selected: defaultChoice(state, config) }, ...redraw],
+      }
     }
 
     case 'cleared':

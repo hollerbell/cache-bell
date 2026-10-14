@@ -6,14 +6,15 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.3.6](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 397 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.3.7](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 407 passing](docs/badge-tests.svg)
 
 **A cache & context manager for Claude Code.** Once the context passes a size you choose, Claude compacts
 after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt
 cache warm or compacts before it expires.
 
 Claude Code compacts an idle session on its own only above roughly 200k tokens, and you can run `/compact`
-any time. With Cache Bell, Claude compacts at a size you choose, after a finished piece of work, and the
+any time. While Cache Bell looks after idle sessions, it stops that compaction and handles the session as
+you set it. With Cache Bell, Claude compacts at a size you choose, after a finished piece of work, and the
 cache can be kept warm while you're away.
 
 ### Context
@@ -70,7 +71,7 @@ your plan. With `cache-bell.profile` = `watch` nothing is sent and Claude is tol
   an hour-long cache expires, and a compaction cannot be undone. If you follow sessions over Remote
   Control, set `cache-bell.compactOnRequest` to `wait` and `cache-bell.idleCompact` to `off`: then nothing
   is compacted without your answer. With `cache-bell.profile` = `watch` nothing is sent at all.
-- 0.3.6 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
+- 0.3.7 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
   plugin does nothing, except that it removes the hour-long cache setting it inherited from the plugin.
 - Coming from 0.2.x: the options have new names, and Claude now compacts by itself past 200K. See
   [CHANGELOG.md](CHANGELOG.md) for what was taken over and how to keep the behaviour of 0.2.13.
@@ -107,7 +108,7 @@ automatically: see [Update](#update).
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.3.6, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
+0.3.7, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
 uses the mods API, which is early access and changes between releases). Tested on Windows and macOS, in
 the terminal; Linux is not tested yet. Before you rely on it, read [the points above](#before-you-rely-on-it).
 
@@ -193,7 +194,8 @@ that and your next message sends the whole context again, uncached.
 Cache Bell counts that time down in the status line and acts before it runs out. What it does then, and
 what that sends, is under [What it does on its own](#what-it-does-on-its-own-and-what-it-sends).
 
-Claude Code compacts an idle session on its own only above roughly 200k tokens. With Cache Bell, Claude
+Claude Code compacts an idle session on its own only above roughly 200k tokens. While Cache Bell looks
+after idle sessions, it stops that compaction and handles the session as you set it. With Cache Bell, Claude
 compacts at a size you choose, after a finished piece of work, by default with a countdown to cancel, and
 an idle session's cache can be kept warm instead.
 
@@ -398,8 +400,11 @@ the Claude Code configuration directory), the last 200 entries, for all sessions
   machine is too busy to answer in ten seconds), the TTL is not known: the plugin only shows that, until
   a read goes through. The same holds for a session that keeps no transcript, and possibly for a provider
   whose responses do not say how the cache was written. Setting `cacheTtl` to `5m` or `1h` gets around all of these.
-- Claude Code itself compacts idle sessions above roughly 200k tokens (since 2.1.286). The plugin sees
-  that compaction and goes to sleep after it.
+- Claude Code itself compacts idle sessions above roughly 200k tokens, shortly before an hour-long cache
+  expires; with the `haiku` or `opusplan` model alias it does not. While the plugin looks after idle sessions,
+  it stops that compaction and goes on as it is set to. With `profile` `watch` or `off`, or below
+  `idleMinContextK`, it lets it go ahead and goes to sleep after it, as before. To turn it off in Claude Code,
+  set `idleCompaction` to `false` in its settings.
 - The colours for a light background are tested, but not yet checked in a real light terminal.
 - The plugin uses only the official mods API and does not patch Claude Code.
 

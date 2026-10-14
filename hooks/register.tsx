@@ -8,7 +8,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { CACHE_SOON, CHOICES, CHOICES_OF, FRAME_MS, SUBAGENT_ANSWER, YIELDED_ANSWER, askView, choiceLabel, choiceOfDigit, choiceTexts, choicesOf, chosenNotice, digitOf, dropReason, mayWake, questionParts, reloadNotice, requestAnswer, skippedNotice, wakeOf, wakePrompt, whyText, withdrawAnswer, WAKE_MAX_CHARS, WAKE_OVERTAKEN, WAKE_TYPING, WAKE_WHY } from '../core/ask'
 import type { AskStyle, Choice, ChoiceText, Wake } from '../core/ask'
 import { resolveConfig, unknownWords } from '../core/config'
-import { cacheBefore, decide, fallbackOf, initialState, isBackWithinHour, levelOf, needsHold } from '../core/decide'
+import { cacheBefore, decide, fallbackOf, holdsBuiltinIdle, initialState, isBuiltinIdle, isBackWithinHour, levelOf, needsHold } from '../core/decide'
 import { NONE } from '../core/extension'
 import type { Extend, Extension } from '../core/extension'
 import { COUNTDOWN_MAX_S, COUNTDOWN_MIN_S, countdownOf, fillInstructions, holdOf, isCacheHit } from '../core/guards'
@@ -97,6 +97,8 @@ let isYielding = false
 let look: Look = 'dark'
 // Observations are applied one at a time, in the order they came.
 let queue: Promise<void> = Promise.resolve()
+// A turn of the main thread runs, or a message that opens one is on its way.
+let isTurnOpen = false
 
 // Who started the turn that is about to begin, as its prompt.submit said: the plugin's own announcement,
 // the person, or somebody else (a background task, another session). A turn no prompt.submit came before,
@@ -1374,6 +1376,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
   on('session.start', async ($, e, next) => {
     surface = e.surface ?? undefined
+    isTurnOpen = false
     await start($, config, e.isInteractive)
     return next(e)
   })
@@ -1513,17 +1516,25 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // A digit and Enter answers the question and is not a message for the model. Any other message from the
   // person is real work: whatever was asked no longer needs an answer.
   on('prompt.submit', async ($, e, next) => {
+    // A message on its way opens a turn: from now on a compaction is the one for the context's size, also
+    // before the turn has started. Taken back where the message is dropped here.
+    const wasTurnOpen = isTurnOpen
+    isTurnOpen = true
+    const dropped = (reason: string) => {
+      isTurnOpen = wasTurnOpen
+      return { drop: reason }
+    }
     const isOwn = e.origin.kind === 'plugin' && e.origin.name === PLUGIN
     // The note after a compaction: a turn of somebody else's as the core sees it, and no announcement.
     if (isOwn && wakeSent !== null && e.text === wakeSent) {
-      if (turnsStarted !== wakeAtTurns) return { drop: `${PLUGIN}: ${WAKE_OVERTAKEN}` }
+      if (turnsStarted !== wakeAtTurns) return dropped(`${PLUGIN}: ${WAKE_OVERTAKEN}`)
       nextTurnBy = 'other'
       return next(e)
     }
     const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
     // The announcement waits for the session to be idle. When work got in first, the compaction it
     // announces is off, and so is the announcement.
-    if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return { drop: `${PLUGIN}: ${OVERTAKEN}` }
+    if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return dropped(`${PLUGIN}: ${OVERTAKEN}`)
     nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
     if (isPerson) void dismissIntro($)
     // Back within the hour after the plugin's own compaction: the turn this message starts ends with the
@@ -1555,7 +1566,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       return next(e)
     }
     closeQuestion($, typed, 'typed and confirmed with Enter')
-    return { drop: dropReason(textOf(typed)) }
+    return dropped(dropReason(textOf(typed)))
   })
 
   // The line Claude Code leaves in the transcript for that digit says a prompt was dropped by a hook.
@@ -1582,6 +1593,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
   on('turn.start', async ($, e, next) => {
     ensureStarted($, config)
+    if (e.agentId === undefined) isTurnOpen = true
     const by = nextTurnBy
     nextTurnBy = 'unknown'
     turnBy = by
@@ -1615,6 +1627,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    if (e.agentId === undefined) isTurnOpen = false
     if (isWatching && e.agentId === undefined) {
       if (!isNamedByEvent) findAt = (await $.clock.now()) + FIND_AFTER_MS
       await observe($, config, { kind: 'turn-complete', contextTokens: (await sizeNow($)) ?? undefined, isAborted: e.isAborted || e.reason !== 'answer', isFailed: e.reason === 'error', hold: await holdNow($, await read($, machine)) })
@@ -1662,6 +1675,19 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   // Every compaction of the main conversation that reaches the hook: the person's /compact and the engine's
   // own. A precompute installs nothing.
   on('session.compact', async ($, e, next) => {
+    // Claude Code's own compaction of an idle session comes as 'auto' with no instructions at all, between
+    // turns (measured on 2.1.299; the release notes name it from 2.1.290). Held back where the plugin looks
+    // after the idle period itself.
+    if (isWatching && isBuiltinIdle(e, isOwnCompaction, isTurnOpen)) {
+      // What is still on its way, a turn that has just started above all, is in the state first.
+      await queue
+      const state = await read($, machine)
+      if (state !== null && holdsBuiltinIdle(state, config)) {
+        noted($, "held Claude Code's own idle compaction")
+        await observe($, config, { kind: 'builtin-idle' })
+        return { skip: "Cache Bell looks after this idle session's cache" }
+      }
+    }
     const result = await next(e)
     const isInstalled = result.skip === undefined && e.agentId === undefined && e.trigger !== 'precompute'
     // The person's /compact and Claude Code's own: the plugin's are logged where it runs them.

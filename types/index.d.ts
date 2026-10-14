@@ -47,6 +47,9 @@ export type State = {
   isAsked: boolean
   // The person chose to let the cache expire: nothing more is done until they work again.
   isDeclined: boolean
+  // Of that, the part that was chosen: the person's Let it expire, or a course set to neither renew nor
+  // compact any more. Not a renewal that failed or a step that was refused. Missing in a state of 0.3.6.
+  isLetExpire: boolean
   // The size of the context after the last turn; null = not known (also right after a compaction).
   contextTokens: number | null
   // While ASKING: why, and when the selected choice is done without an answer.

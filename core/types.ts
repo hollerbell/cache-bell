@@ -47,6 +47,8 @@ export type Observation =
   // own: the plugin ran it itself, with the sizes before and after in tokens, and isIdle when it ran before an
   // idle session's cache expired; tokensAfter: the size after another's compaction, where Claude Code said it
   | { kind: 'compacted'; own?: { before: number | null; after: number | null; isIdle?: boolean }; tokensAfter?: number | null }
+  // Claude Code was about to compact the idle session itself (holdsBuiltinIdle) and the shell held it back
+  | { kind: 'builtin-idle' }
   | { kind: 'cleared' }
   // the session was resumed from its transcript in a new process: when its last request went out, as the
   // transcript or Claude Code says, and the size of the context then

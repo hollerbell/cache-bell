@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { HOUR_NOT_GRANTED, cacheBefore, decide, initialState, isBackWithinHour, isGuessed } from '../../core/decide'
+import { HOUR_NOT_GRANTED, cacheBefore, decide, holdsBuiltinIdle, initialState, isBackWithinHour, isBuiltinIdle, isGuessed } from '../../core/decide'
 import { TTL_1H, TTL_5M } from '../../core/timing'
 import type { Action, Config, Observation, State } from '../../core/types'
 import { configOf } from './options'
@@ -23,7 +23,7 @@ const run = (from: State, steps: [number, Observation][], cfg: Config = config):
   steps.reduce((current, [now, observation]) => decide(current, now, observation, cfg).state, from)
 
 test('the initial state knows nothing and assumes five minutes', () => {
-  expect(initialState(config)).toEqual({ phase: 'UNKNOWN', anchorAt: null, ttlMs: TTL_5M, ttlSource: 'default', isTtlUnread: false, coldReason: null, resumeTo: null, renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, retryAt: null, contextTokens: null, askReason: null, askDeadline: null, ext: {}, isRequested: false, priorAnchorAt: null, held: null, isOrdered: false, requestMs: null, workedAt: null, lastCompaction: null })
+  expect(initialState(config)).toEqual({ phase: 'UNKNOWN', anchorAt: null, ttlMs: TTL_5M, ttlSource: 'default', isTtlUnread: false, coldReason: null, resumeTo: null, renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, isLetExpire: false, retryAt: null, contextTokens: null, askReason: null, askDeadline: null, ext: {}, isRequested: false, priorAnchorAt: null, held: null, isOrdered: false, requestMs: null, workedAt: null, lastCompaction: null })
   expect(initialState(configOf({ cacheTtl: '1h' }))).toMatchObject({ ttlMs: TTL_1H, ttlSource: 'config' })
 })
 
@@ -410,4 +410,73 @@ test('a resumed session is watched like any other: the question comes when its t
   expect(kinds(decide(resumed, T0 + S, tick, acting).actions)).not.toContain('ask')
   const later = decide(resumed, T0 + 30 * 60 * S, tick, acting)
   expect(kinds(later.actions)).toContain('ask')
+})
+
+// Claude Code's own compaction of an idle session comes at nine tenths of the hour.
+const BUILTIN_AT = T0 + 54 * 60 * S
+
+test("Claude Code's idle compaction is held where the plugin looks after the idle period", () => {
+  const acting = configOf({})
+  const hour = { ttlMs: TTL_1H, contextTokens: 250000 }
+  const chosen = { ...hour, isAsked: true, isDeclined: true, isLetExpire: true }
+  for (const looked of [warm(hour), warm({ ...hour, isAsked: true, renewals: 2 }), warm(chosen), warm({ ...hour, phase: 'ASKING' }), warm({ ...hour, phase: 'RENEWING' }), warm({ ...hour, phase: 'COMPACTING' })]) {
+    expect(holdsBuiltinIdle(looked, acting)).toBe(true)
+  }
+  // Set never to compact an idle session: the renewals used up, the cache is left to expire, not compacted.
+  expect(holdsBuiltinIdle(warm({ ...hour, isAsked: true, renewals: 2 }), configOf({ idleCompact: 'off' }))).toBe(true)
+  // A turn that runs compacts for its size; a cache the plugin knows nothing of or only guessed (its timer
+  // does nothing on a guess), a small context, an idle period the plugin gave up on by itself, a profile that
+  // does not compact and a plugin switched off leave it to Claude Code.
+  const left = [
+    warm({ ...hour, phase: 'BUSY' }),
+    warm({ ...hour, phase: 'PREPARING' }),
+    warm({ ...hour, phase: 'UNKNOWN' }),
+    warm({ ...hour, phase: 'DORMANT' }),
+    warm({ ...hour, ttlSource: 'settings' }),
+    warm({ ...hour, contextTokens: 50000 }),
+    warm({ ...hour, isDeclined: true }),
+  ]
+  for (const one of left) expect(holdsBuiltinIdle(one, acting)).toBe(false)
+  expect(holdsBuiltinIdle(warm(hour), configOf({ profile: 'watch' }))).toBe(false)
+  expect(holdsBuiltinIdle(warm(hour), configOf({ enabled: false }))).toBe(false)
+  // Acting without asking is looking after it too.
+  expect(holdsBuiltinIdle(warm(hour), configOf({ idleAsk: 'never' }))).toBe(true)
+})
+
+test("only 'auto' with no instructions, of the main conversation, between turns, may be Claude Code's idle compaction", () => {
+  expect(isBuiltinIdle({ trigger: 'auto' }, false, false)).toBe(true)
+  expect(isBuiltinIdle({ trigger: 'auto', instructions: '' }, false, false)).toBe(true)
+  // The plugin's own, whatever it comes as, is never held back.
+  for (const e of [{ trigger: 'auto' }, { trigger: 'auto', instructions: '' }, { trigger: 'manual' }, {}]) expect(isBuiltinIdle(e, true, false)).toBe(false)
+  // In a turn, or with a message on its way to open one: the compaction for the context's size.
+  expect(isBuiltinIdle({ trigger: 'auto' }, false, true)).toBe(false)
+  for (const e of [{ trigger: 'manual' }, { trigger: 'precompute' }, { trigger: 'auto', agentId: 'a1' }, { trigger: 'auto', instructions: 'Keep the paths.' }]) {
+    expect(isBuiltinIdle(e, false, false)).toBe(false)
+  }
+})
+
+test('held, it is asked about only where nothing was offered in this idle period', () => {
+  const acting = configOf({})
+  // A question an interrupted turn took down, or a timer that waited for the person's typing.
+  const unasked = warm({ ttlMs: TTL_1H, contextTokens: 250000 })
+  const { state: asked, actions } = decide(unasked, BUILTIN_AT, { kind: 'builtin-idle' }, acting)
+  expect(asked).toMatchObject({ phase: 'ASKING', isAsked: true, askReason: 'cache' })
+  const ask = actions.find(action => action.kind === 'ask')
+  expect(ask).toMatchObject({ reason: 'cache', selected: 'renew' })
+  // Past the time to act: the countdown of a question, within the cache's last safe moment.
+  expect(asked.askDeadline).toBe(BUILTIN_AT + 30 * S)
+  // Before it, the question stays up to the time to act, as the timer's own would.
+  const early = decide(unasked, T0 + 40 * 60 * S, { kind: 'builtin-idle' }, acting).state
+  expect(early.askDeadline).toBe(T0 + 50 * 60 * S)
+  // Asked already, declined, waiting with a compaction, a question open, or set never to ask: nothing more.
+  for (const done of [{ ...unasked, isAsked: true }, { ...unasked, isDeclined: true }, { ...unasked, held: { by: 'typing' as const, isTold: false } }, { ...unasked, phase: 'ASKING' as const }]) {
+    const after = decide(done, BUILTIN_AT, { kind: 'builtin-idle' }, acting)
+    expect(after.state).toBe(done)
+    expect(after.actions).toEqual([])
+  }
+  expect(decide(unasked, BUILTIN_AT, { kind: 'builtin-idle' }, configOf({ idleAsk: 'never' })).actions).toEqual([])
+  // Too late for a question: nothing is asked, and the timer acts at its next tick.
+  const late = T0 + 54 * 60 * S + 55 * S
+  expect(decide(unasked, late, { kind: 'builtin-idle' }, acting).actions).toEqual([])
+  expect(kinds(decide(unasked, late, tick, acting).actions)).toContain('renew')
 })

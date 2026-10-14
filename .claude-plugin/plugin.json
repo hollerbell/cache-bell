@@ -1,7 +1,7 @@
 {
   "name": "cache-bell",
   "displayName": "Cache Bell",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Cache & context manager for Claude Code. Once the context passes a size you choose, Claude compacts after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt cache warm or compacts before it expires.",
   "author": {
     "name": "FEO digital agency s.r.o."
