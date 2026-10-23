@@ -68,7 +68,7 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, isPeerDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, transcript = ASSISTANT_5M, size = 100): Seen => {
@@ -83,6 +83,7 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   answers.isSuperseded = false
   answers.theme = 'dark'
   answers.isAnnouncementDropped = false
+  answers.isPeerDropped = false
   answers.fork = 'answered'
   answers.stored = null
   answers.agents = []
@@ -214,6 +215,7 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   on('prompt.submit', ($, e) => {
     // Another plugin's hook may drop the announcement before it enters.
     if (e.origin.kind === 'plugin' && answers.isAnnouncementDropped) return { drop: 'another plugin said no' } as never
+    if (e.origin.kind === 'peer' && answers.isPeerDropped) return { drop: 'another plugin keeps it out' } as never
     if (e.origin.kind === 'plugin') seen.did.push(e.text.startsWith('Cache Bell: the compaction you asked for is done.') ? `wake: ${e.text}` : 'prepare')
     return { text: e.text }
   })
@@ -2355,6 +2357,33 @@ test('the person can drop what the session asked for', async ($, on) => {
   expect(await status($)).toMatch(/State: warm/)
 })
 
+test("another session's digit is a message like any other and answers nothing", async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await askingTurn($, clock)
+  // 2 is Not now: from another session it goes on to the model, and the question stays the person's.
+  expect(await $.prompt.submit({ text: '2', wait: false, origin: { kind: 'peer' } } as never)).not.toHaveProperty('drop')
+  await turn($, clock, 5 * S, undefined, false)
+  await clock.settle()
+  expect(seen.toasts).toEqual([])
+  // The countdown stood still while that turn ran.
+  expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:30')
+  await clock.advance(31 * S)
+  expect(seen.did.length).toBe(1)
+})
+
+test('a digit that comes from no person in any other way answers nothing either', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await askingTurn($, clock)
+  for (const kind of ['peer-send-message', 'task-notification', 'coordinator']) {
+    expect(await $.prompt.submit({ text: '2', wait: false, origin: { kind } } as never)).not.toHaveProperty('drop')
+  }
+  expect(seen.toasts).toEqual([])
+})
+
 test('set to auto the compaction follows the turn at once; set to off the session is refused', { options: { compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
@@ -2892,9 +2921,25 @@ test('notify with a waiting session request sends nothing at all without the per
 })
 
 // A turn another session's message starts: its prompt comes in with an origin that is not the person's.
-const otherTurn = async ($: Engine, clock: Clock, lastsMs: number) => {
-  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+const otherTurn = async ($: Engine, clock: Clock, lastsMs: number, kind = 'peer') => {
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind } } as never)
   await turn($, clock, lastsMs, undefined, false)
+}
+
+for (const kind of ['peer-send-message', 'projects-relay']) {
+  test(`a message from another session delivered as ${kind} only interrupts the question too`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    await askingTurn($, clock)
+    await clock.advance(10 * S)
+    await otherTurn($, clock, 5 * S, kind)
+    await clock.settle()
+    expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:20')
+    await clock.advance(21 * S)
+    expect(seen.did.length).toBe(1)
+  })
 }
 
 test('a message from another session only interrupts the question about what Claude asked for', async ($, on) => {
@@ -3448,6 +3493,93 @@ test('three compactions in a row are followed by a note; then the person has to 
   await clock.settle()
   expect(wakes(seen).length).toBe(4)
 })
+
+test('a message from another session starts the count of notes in a row over, as the person does', { options: { compactCountdown: 30, compactNotesInRow: 2 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  for (let round = 0; round < 2; round++) {
+    expect(await askingWith($, clock, `Round ${round}.`, round === 0)).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+  }
+  expect(await askingWith($, clock, 'Round 2.', false)).toMatch(/Your note will not be sent: 2 compactions in a row/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(2)
+  // Another session writes: the turn it starts may leave a note again.
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  expect(await askingWith($, clock, 'Round 3.', false)).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(3)
+})
+
+test("the session's own message to its agents does not start the count of notes in a row over", { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  await $.prompt.submit({ text: 'go on with the review', wait: false, origin: { kind: 'coordinator' } } as never)
+  expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/Your note will not be sent: 1 compactions? in a row/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(1)
+})
+
+for (const kind of ['peer-send-message', 'projects-relay']) {
+  test(`a message from another session delivered as ${kind} starts the count over too`, { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind } } as never)
+    expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    expect(wakes(seen).length).toBe(2)
+  })
+}
+
+test('a message from another session that another plugin drops does not start the count over', { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  answers.isPeerDropped = true
+  expect(await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)).toEqual({ drop: 'another plugin keeps it out' })
+  expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/Your note will not be sent: 1 compactions? in a row/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(1)
+})
+
+for (const [name, origin] of [['a task notification', { kind: 'task-notification' }], ['a message nobody could place', { kind: 'unclassified' }], ["another plugin's message", { kind: 'plugin', name: 'another-plugin' }]] as const) {
+  test(`${name} does not start the count of notes in a row over`, { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    await $.prompt.submit({ text: 'a subagent finished', wait: false, origin } as never)
+    expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/Your note will not be sent: 1 compactions? in a row/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    expect(wakes(seen).length).toBe(1)
+  })
+}
 
 for (const [name, options, rounds] of [['five by default', {}, 5], ['any number with the limit off', { compactNotesInRow: 0 }, 7]] as const) {
   test(`notes in a row: ${name}`, { options: { compactCountdown: 30, ...options }, timeoutMs: LONG }, async ($, on) => {

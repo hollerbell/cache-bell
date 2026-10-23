@@ -108,8 +108,12 @@ type TurnBy = 'person' | 'self' | 'other' | 'unknown'
 let nextTurnBy: TurnBy = 'unknown'
 // Who started the turn that is running.
 let turnBy: TurnBy = 'unknown'
+// The origins of another session's message, however it was delivered: as a turn of its own, as a SendMessage
+// notification, or as a coordinating session's relay to one of its threads. Not 'coordinator': that is what
+// a session sends its own agents, and must not let a session start the count over by itself.
+const PEERS = ['peer', 'peer-send-message', 'projects-relay']
 // The origins of a prompt that are known not to be the person.
-const OTHERS = ['task-notification', 'scheduled-trigger', 'peer', 'plugin']
+const OTHERS = ['task-notification', 'scheduled-trigger', 'plugin', ...PEERS]
 
 // Why the plugin's next compaction comes and who decided, kept from the question or the request to the
 // compaction itself; `note` is what the session said when it asked. A compaction the plugin runs is logged
@@ -1513,8 +1517,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     return next(e)
   })
 
-  // A digit and Enter answers the question and is not a message for the model. Any other message from the
-  // person is real work: whatever was asked no longer needs an answer.
+  // A digit and Enter from the person answers the question and is not a message for the model. Any other
+  // message from the person is real work: whatever was asked no longer needs an answer.
   on('prompt.submit', async ($, e, next) => {
     // A message on its way opens a turn: from now on a compaction is the one for the context's size, also
     // before the turn has started. Taken back where the message is dropped here.
@@ -1536,6 +1540,14 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     // announces is off, and so is the announcement.
     if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return dropped(`${PLUGIN}: ${OVERTAKEN}`)
     nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
+    // Another session's message is work from outside, as the person's is: notes after a compaction count
+    // from it again, once it got past the other plugins. A session the other sessions drive would otherwise
+    // wait for the person after a few.
+    const passed = async () => {
+      const result = await next(e)
+      if (PEERS.includes(e.origin.kind) && result.drop === undefined) wakesInRow = 0
+      return result
+    }
     if (isPerson) void dismissIntro($)
     // Back within the hour after the plugin's own compaction: the turn this message starts ends with the
     // second chance. Read before the turn starts, which forgets the compaction.
@@ -1556,14 +1568,16 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       wakeText = ''
       void observe($, config, { kind: 'withdrawn' })
     }
-    if (question === null || e.origin.kind === 'plugin') return next(e)
-    const typed = choiceOfDigit(question.choices, e.text.trim())
+    if (question === null || e.origin.kind === 'plugin') return passed()
+    // The question is the person's: a digit from another session or a background task is a message like
+    // any other, and answers nothing.
+    const typed = isPerson ? choiceOfDigit(question.choices, e.text.trim()) : null
     if (typed === null) {
       // A real question is the core's to close, when the turn this message starts begins: a message that
       // starts no turn (another plugin dropped it) leaves the question up.
-      if (question.isSticky || question.answer !== null) return next(e)
+      if (question.isSticky || question.answer !== null) return passed()
       endQuestion($, 'Demo: question closed, you sent a message.')
-      return next(e)
+      return passed()
     }
     closeQuestion($, typed, 'typed and confirmed with Enter')
     return dropped(dropReason(textOf(typed)))

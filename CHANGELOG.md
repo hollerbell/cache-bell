@@ -2,6 +2,22 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.11
+
+- A message from another Claude session counts as such however Claude Code delivers it: also as a SendMessage notification, or relayed by a session that coordinates others. What a session sends its own agents does not count. It starts the count of `compactNotesInRow` over, and while you are being asked about a compaction Claude asked for, it only interrupts the question. Until now only one of these ways did: after the others, the session waited for you after a few compactions, and the compaction Claude asked for was dropped.
+
+## 0.3.10
+
+- The tests badge in the README shows the tests of the published plugin again (412). Until now 0.3.8 and 0.3.9 counted tests that are not published with it.
+
+## 0.3.9
+
+- A digit only answers Cache Bell's question when you type it. A message from another Claude session, or from a background task, that holds just a choice's digit now goes to Claude like any other message. Until now such a message answered the question in your place, for example with Not now.
+
+## 0.3.8
+
+- A message from another Claude session now counts like yours for `compactNotesInRow`: after it, compactions may again be followed by the note Claude left for itself. Until now only your own message did, so a session that other sessions drive stopped after five compactions in a row and waited for you.
+
 ## 0.3.7
 
 - Recent versions of Claude Code compact an idle session by themselves shortly before an hour-long cache expires, once it is above roughly 200k tokens. While Cache Bell looks after idle sessions (`profile` `bellcompact`), it now stops that compaction and goes on as it is set to: it asks, renews or compacts. If it has not asked yet in this idle period, it asks right away, unless `idleAsk` is `never`. Until now that compaction went ahead, even when you had chosen Renew. With `profile` `watch` or `off`, or below `idleMinContextK`, the plugin lets it go ahead. To turn it off in Claude Code itself, set `idleCompaction` to `false` in Claude Code's settings.
