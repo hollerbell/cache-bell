@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.3.11](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 419 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.3.18](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 440 passing](docs/badge-tests.svg)
 
 **A cache & context manager for Claude Code.** Once the context passes a size you choose, Claude compacts
 after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt
@@ -71,7 +71,7 @@ your plan. With `cache-bell.profile` = `watch` nothing is sent and Claude is tol
   an hour-long cache expires, and a compaction cannot be undone. If you follow sessions over Remote
   Control, set `cache-bell.compactOnRequest` to `wait` and `cache-bell.idleCompact` to `off`: then nothing
   is compacted without your answer. With `cache-bell.profile` = `watch` nothing is sent at all.
-- 0.3.11 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
+- 0.3.18 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
   plugin does nothing, except that it removes the hour-long cache setting it inherited from the plugin.
 - Coming from 0.2.x: the options have new names, and Claude now compacts by itself past 200K. See
   [CHANGELOG.md](CHANGELOG.md) for what was taken over and how to keep the behaviour of 0.2.13.
@@ -108,7 +108,7 @@ automatically: see [Update](#update).
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.3.11, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
+0.3.18, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
 uses the mods API, which is early access and changes between releases). Tested on Windows and macOS, in
 the terminal; Linux is not tested yet. Before you rely on it, read [the points above](#before-you-rely-on-it).
 
@@ -160,7 +160,7 @@ description names it.
 | `compactContextNotices` | `true` | From 50 % of the window on, Claude gets a one-line notice of the context's size after a tool result: again every further 5 %, and at 85, 90 and 95 %. You don't see it; no request is sent for it. |
 | `compactOnRequest` | `confirm` | What Claude's own request for a compaction does: `confirm` asks you and compacts when the countdown ends, `wait` asks you and compacts only if you say so, `auto` compacts right after the turn, `off` refuses. |
 | `compactCountdown` | `30` | Seconds you have to cancel a compaction Claude asked for, 5 to 3600. Claude may name a time of its own with a request, 10 to 600 seconds. |
-| `compactNotesInRow` | `5` | How many compactions in a row may be followed by the note Claude left for itself, before you have to write a message (a message from another Claude session counts too). `0` = no limit. See "What it does on its own, and what it sends" below. |
+| `compactNotesInRow` | `5` | How many compactions in a row may be followed by the note Claude left for itself, before you have to write a message (one you send from Slack counts too, and so does a message from another Claude session). `0` = no limit. See "What it does on its own, and what it sends" below. |
 | `compactInstructions` | empty | Instructions for the summary when the plugin compacts. Empty: a plain summary. See below the table. |
 | `idleMinContextK` | `80` | Below this, in thousands of tokens, nothing is done about the cache of an idle session. A compaction Claude asks for is not affected. |
 | `idleAsk` | `first` | When you are asked before the plugin renews or compacts an idle session's cache: `first` (the first time in an idle period, and again before a compaction), `every` or `never`. |
@@ -219,6 +219,8 @@ A light theme gets darker colours.
   turn ends, a compaction Claude asked for is offered again, with the time the countdown had left and at
   least ten seconds. A digit you had typed still selects its choice. A digit in such a message answers
   nothing.
+- Only the terminal shows the question, so only a digit typed there answers it. A digit you send from your
+  phone, from Slack or from another app goes to Claude as any other message of yours.
 - While a question is open, a message of yours that is exactly one of its digits answers the question, even
   if Claude has just asked you to pick "1 or 2". Write more than the digit to answer Claude.
 
@@ -263,7 +265,7 @@ a prompt, and the question, when there is one, says that the session `will conti
 marked as Claude's own, not as your message. The note is not sent when you cancel, when you send a message
 during the countdown, when the prompt box holds a message you are writing, when other work has started
 since the compaction began, or when the compaction fails. By default, after five compactions in a row
-that were each followed by a note, no further note is sent until you, or another Claude session, write a message. Sessions that write to each other can therefore carry on without you. `compactNotesInRow`
+that were each followed by a note, no further note is sent until you write a message, in the terminal or from Slack, or another Claude session does. What a channel relays, a build's result for example, does not count. Sessions that write to each other can therefore carry on without you. `compactNotesInRow`
 sets another number, and `0` takes the limit off. Every note starts a new turn, and those turns count against
 the limits of your plan, or are billed to your API key. With `0`, a session can keep going without you for as
 long as Claude keeps leaving notes. A compaction started by the cache
@@ -466,12 +468,17 @@ What it reads:
   or logged;
 - changes of the prompt box, as you type: while a question is open, to see whether the box holds one of
   the question's digits (when a second digit is typed after the first, it puts that digit alone into the
-  box); at any time, to note when you last typed. What you typed is not kept or logged, only the time;
+  box); at any time, to note when you last typed. What you typed is not kept or logged, only the time.
+  After your digit answered a question, Claude Code puts it back in the box: the plugin then reads the box
+  up to three times within two seconds and empties it when it holds that digit alone. Anything else in the
+  box is left there, and not kept or logged;
 - the list of the session's subagents, for whether one still runs;
 - every message that is sent, at the moment it is sent: its text and where it comes from (you, another
   session, a background task, a plugin). The text is compared with the digits of an open question and with
-  the plugin's own prompts, and is not kept or logged. A message of yours that is exactly a digit of the
-  open question is your answer: the plugin takes it and does not let it reach Claude;
+  the plugin's own prompts, and is not logged. It is not kept either, except that the plugin holds a message
+  sent while Claude is working in its memory until the next turn starts, to tell whether that turn is
+  yours, and then forgets it. A message of yours typed in the terminal that is exactly a digit of the open question is
+  your answer: the plugin takes it and does not let it reach Claude;
 - when each request to the model is sent, when a turn starts and ends and how it ended, and each compaction
   with its sizes before and after: the times, the counts and the reasons, nothing of what was said; also
   the model's name of the last request, held in memory for `/bell report` and not written anywhere;
@@ -574,10 +581,10 @@ What it hooks. It serves two things of its own through hooks: the command `/bell
 It answers no other command and no other tool, and takes no permission decision. Its other hooks on events
 that are also calls: `prompt.submit`, for the messages that are sent, and `session.append`, for the two
 notices in the transcript, both as said above; `config.set`, for the theme only, passed on unchanged;
-`session.compact`, passed on unchanged, to log the compaction. It listens to three of Claude Code's hook
-events and passes each on unchanged: `Stop`, for the path of the transcript; `SessionStart`, for the path of
-the transcript and to learn that a compaction or a `/clear` happened or that the session was resumed; `PostModelSwitch`, for the
-cache TTL of the new model.
+`session.compact`, passed on unchanged, to log the compaction. It listens to two of Claude Code's hook
+events and passes each on unchanged: `SessionStart`, for the path of the transcript and to learn that a
+compaction or a `/clear` happened or that the session was resumed; `PostModelSwitch`, for the cache TTL
+of the new model.
 
 It writes nothing to `settings.json` and never asks for credentials. To delete what it kept, delete its
 file in the store. It is kept until you do, except that the log drops entries beyond the newest 200.

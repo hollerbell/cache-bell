@@ -2,6 +2,36 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.18
+
+- Under a Team or Enterprise login, or with managed settings, a finished turn no longer ends with the line "cache-bell: its classic.Stop hook was skipped". The plugin no longer uses Claude Code's Stop event: it reads the transcript when the turn ends. Until now Claude Code's built-in guard sent that event on past the plugin and said so after every turn.
+
+## 0.3.17
+
+- A digit you send from your phone (Remote Control) or from another app no longer answers the question, which only the terminal shows. It goes to Claude as any other message of yours and takes back a compaction Claude asked for. Until now it answered a question you could not see, so a 1 chose Compact.
+- A message you send just as another session's message starts a turn now takes back a compaction Claude asked for, as any message of yours does. Until now the question could come back when that turn ended, with Compact as what happens without an answer.
+- The Privacy section now also says that the plugin reads the prompt box after a digit answered a question, and that it holds a message sent while Claude is working until the next turn starts.
+
+## 0.3.16
+
+- After you answer a question with its digit and Enter, the prompt is empty again. Until now Claude Code put the digit back in the prompt, so your next message began with it. Anything else in the prompt is left as it is.
+
+## 0.3.15
+
+- A message you send while Claude writes its note before a compaction the timers brought now calls that compaction off, as Esc does, and counts as your work. Until now the compaction followed all the same. A compaction you chose yourself still goes ahead.
+
+## 0.3.14
+
+- A message you send while Claude is working (not while it writes its note before a compaction), which Claude takes in during that turn, now counts as your work as one that starts a turn does: the idle period and its renewals start over, and "Not now" or "Let it expire" no longer holds for the next idle period. Until now such a message changed nothing of it, so after "Let it expire" the cache was left to expire although you had gone on working.
+
+## 0.3.13
+
+- A message sent while Claude is working, which Claude takes in during that turn, no longer marks a later turn as its own. Until now the next turn that started without a message of its own (a continuation, for example) counted as that message's, and the plugin treated it so: as your work, which starts the idle period and its renewals over, or as another session's, which kept a compaction Claude asked for that such a turn should have dropped. A message of yours taken in that way now also starts the count of `compactNotesInRow` over.
+
+## 0.3.12
+
+- A message you send to the session from Slack now starts the count of `compactNotesInRow` over, as one typed in the terminal does. Until now only the terminal's did, so a session you drove from Slack waited for the terminal after a few compactions. A digit sent that way still answers no question of Cache Bell's, which only the terminal shows. What a channel relays (Slack, Telegram, a build's result) does not count: it may come from a bot, not from you.
+
 ## 0.3.11
 
 - A message from another Claude session counts as such however Claude Code delivers it: also as a SendMessage notification, or relayed by a session that coordinates others. What a session sends its own agents does not count. It starts the count of `compactNotesInRow` over, and while you are being asked about a compaction Claude asked for, it only interrupts the question. Until now only one of these ways did: after the others, the session waited for you after a few compactions, and the compaction Claude asked for was dropped.

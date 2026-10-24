@@ -68,7 +68,7 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, isPeerDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, agents: [] as string[], listed: 0, isListBroken: false, isStopBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, isPeerDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, kept: null as string | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, transcript = ASSISTANT_5M, size = 100): Seen => {
@@ -86,10 +86,10 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   answers.isPeerDropped = false
   answers.fork = 'answered'
   answers.stored = null
+  answers.kept = null
   answers.agents = []
   answers.listed = 0
   answers.isListBroken = false
-  answers.isStopBroken = false
   answers.only = ''
   answers.usages = 0
   answers.isUsageBroken = false
@@ -133,9 +133,11 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   })
   // What the plugin built on this one keeps in the session; this plugin's own state stays the engine's.
   // `answers.stored` is the state an earlier instance of this plugin left behind, read until this one
-  // writes its own: a reload.
-  on('state.get', (($: unknown, e: { plugin: string }, next: (e: unknown) => unknown) => {
+  // writes its own: a reload. `answers.kept` is the transcript's path it left behind; '' = none, the state
+  // started over.
+  on('state.get', (($: unknown, e: { plugin: string; key: string }, next: (e: unknown) => unknown) => {
     if (e.plugin === 'holler-bell') return { value: { value: answers.isSuperseded, version: 1 } }
+    if (e.key === 'transcript' && answers.kept !== null) return { value: { value: answers.kept === '' ? null : answers.kept, version: 0 } }
     return answers.stored === null ? next(e) : { value: { value: answers.stored, version: 0 } }
   }) as never)
   on('state.set', (($: unknown, e: unknown, next: (e: unknown) => unknown) => {
@@ -237,11 +239,6 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
   })
   on('turn.complete', () => ({ text: '' }))
-  // Another plugin's Stop hook, below this one.
-  on('classic.Stop', () => {
-    if (answers.isStopBroken) throw new Error('another hook failed')
-    return {}
-  })
   on('classic.SessionStart', () => ({}))
   on('classic.PostModelSwitch', () => ({}))
   on('session.compact', ($, e) => {
@@ -277,6 +274,8 @@ const turn = async ($: Engine, clock: Clock, lastsMs: number, agentId?: string, 
   await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: lastsMs, isAborted: false, reason: 'answer', ...(agentId === undefined ? {} : { agentId }) })
 }
 
+// Claude Code names the session's transcript when the session starts.
+const named = ($: Engine, path = '/work/session.jsonl') => $.classic.SessionStart({ source: 'startup', transcript_path: path } as never)
 // One request of the main thread, in a turn that is already running.
 const request = async ($: Engine) => {
   const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1 })
@@ -366,19 +365,19 @@ test('the TTL comes from the transcript when the turn stops', { options: { displ
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 55 min')
   expect(seen.processes).toBe(0)
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
 })
 
-test('a response written to the transcript after the Stop hook is read a few seconds later', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
+test('a response written to the transcript after the turn ended is read a few seconds later', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, '{"type":"user"}\n')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
   // Nothing was appended yet: the first look finds the same file and waits for the next.
   await clock.advance(4 * S)
@@ -394,8 +393,8 @@ test('the last of the late looks, half a minute on, still finds the response', {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, '{"type":"user"}\n')
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   await clock.advance(20 * S)
   answers.appended = `${ASSISTANT_1H}\n`
   answers.grown = 500
@@ -408,8 +407,8 @@ test('a transcript that grows with no response is read three more times after a 
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, '{"type":"user"}\n', LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(seen.processes).toBe(1)
   for (let second = 1; second <= 120; second += 1) {
     answers.grown = second * 100
@@ -419,27 +418,12 @@ test('a transcript that grows with no response is read three more times after a 
   expect((await run($, 'report')).text).toContain('next try none')
 })
 
-test('where another Stop hook fails the transcript is still named, and a tick reads it', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
-  const clock = mock.clock(on, { now: T0 })
-  stubs(on, {}, `${ASSISTANT_1H}\n`)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  await turn($, clock, 0)
-  answers.isStopBroken = true
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false }).catch(() => undefined)
-  expect((await run($, 'report')).text).toContain('Transcript: path known yes')
-  expect(await status($)).toContain('Cache TTL: 5m (assumed, not yet seen in the data)')
-  // Past the time a hook is given, the read is done without the hook.
-  await clock.advance(16 * S)
-  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
-  expect((await run($, 'report')).text).toContain('next try none')
-})
-
 test('with reading the transcript switched off the file is never touched', { options: { displayBelowMinutes: 0, cacheTtl: 'settings' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, ASSISTANT_1H)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(answers.looked).toBe(0)
   expect(seen.processes).toBe(0)
   // The lifetime stays what was assumed: five minutes.
@@ -450,8 +434,8 @@ test('a transcript too large to read is read by its tail', { options: { displayB
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, { OS: 'Windows_NT' }, `${ASSISTANT_1H}\n`, 4 * 1024 * 1024 + 1)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($, 'C:/work/session.jsonl')
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: 'C:/work/session.jsonl', stop_hook_active: false })
   expect(seen.processes).toBe(1)
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache expires in 55 min')
 })
@@ -1050,8 +1034,8 @@ test('a TTL set in the options is not overridden by the transcript', { options: 
   const clock = mock.clock(on, { now: T0 })
   stubs(on, { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await status($)).toBe(
     [
       'version 0.1.0 · on, bellcompact[off]',
@@ -1166,8 +1150,9 @@ test('/bell report gathers what an issue needs and shows no address and no path'
   // Before anything was seen the report still answers.
   expect((await run($, 'report')).text).toContain('Transcript: path known no · exists not asked · size unknown · read for the TTL never')
 
+  await named($)
+
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   await clock.advance(40 * S)
   const rows = ((await run($, 'report')).text ?? '').split('\n')
   expect(rows[1]).toBe('Cache Bell 0.1.0 · Claude Code version not seen · Windows · terminal')
@@ -1176,7 +1161,7 @@ test('/bell report gathers what an issue needs and shows no address and no path'
   expect(rows[6]).toBe('State: WARM · TTL 1h from transcript · TTL unread no · last request 0:40 ago · context 143 985 tokens · renewals 0')
   expect(rows[7]).toBe('Transcript: path known yes · exists yes · size 100 bytes · read for the TTL 0:40 ago · failed reads 0 · next try none')
   expect(rows[8]).toBe('End of the transcript: responses of the main thread 1 · usage of the last: cache_creation{ephemeral_1h_input_tokens=900 ephemeral_5m_input_tokens=0}')
-  expect(rows[9]).toBe("Events seen: SessionStart 0, with the transcript's path 0 · Stop 1, with the path 1 · requests of the main thread 1")
+  expect(rows[9]).toBe("Events seen: SessionStart 1, with the transcript's path 1 · requests of the main thread 1")
   expect(rows[10]).toBe("The plugin's last notices: none")
   expect(rows.join('\n')).not.toMatch(/gateway|session\.jsonl|\/work/)
   expect(seen.logs).toEqual([])
@@ -1187,8 +1172,8 @@ test('/bell report names a transcript that cannot be read and the notice that sa
   stubs(on, {}, `${ASSISTANT_1H}\n`, 5 * 1024 * 1024)
   answers.tailExit = 1
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   const text = (await run($, 'report')).text ?? ''
   expect(text).toContain('size 5 242 880 bytes · read for the TTL never · failed reads 1 · next try in 0:15')
   expect(text).toContain('End of the transcript: not read: exited with 1')
@@ -1228,8 +1213,8 @@ test('the end of a large transcript is read with the command of the system', asy
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(seen.argv).toEqual([['tail', '-c', '1048576', '/work/session.jsonl']])
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
 })
@@ -1238,8 +1223,8 @@ test('on Windows the end is read by PowerShell with the path inside the command'
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, { OS: 'Windows_NT' }, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($, 'C:\\work\\session.jsonl')
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: 'C:\\work\\session.jsonl', stop_hook_active: false })
   expect(seen.argv.length).toBe(1)
   expect(seen.argv[0]?.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-Command'])
   expect(seen.argv[0]?.[4]).toContain("[IO.File]::Open('C:\\work\\session.jsonl','Open','Read','ReadWrite')")
@@ -1250,8 +1235,8 @@ test('on Windows PowerShell is started by its full path under SystemRoot, not lo
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, { OS: 'Windows_NT', SystemRoot: 'C:\\WINDOWS' }, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($, 'C:\\work\\session.jsonl')
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: 'C:\\work\\session.jsonl', stop_hook_active: false })
   expect(seen.argv[0]?.[0]).toBe('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
 })
@@ -1260,8 +1245,8 @@ test('a transcript that did not grow is not read again, and a confirmed TTL only
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  const stop = () => $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
-  await turn($, clock, 0)
+  await named($)
+  const stop = () => turn($, clock, 0)
   await stop()
   expect(seen.processes).toBe(1)
   // The same size: nothing was appended, nothing is read.
@@ -1290,8 +1275,8 @@ test('a transcript that cannot be read leaves the TTL a guess: nothing is sent o
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   answers.tailExit = 1
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   // One failure is not said yet: the next try may go through.
   expect(seen.logs).toEqual([])
   expect(await bandText($)).toBe('h⣿ Cache Bell: prompt cache: lifetime not known yet, the transcript could not be read · nothing is renewed or compacted until it is')
@@ -1319,8 +1304,8 @@ test('a read that fails once and goes through at the next try is not said at all
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   answers.tailExit = 1
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   answers.tailExit = 0
   await clock.advance(16 * S)
   expect(seen.processes).toBe(2)
@@ -1333,8 +1318,8 @@ test('a transcript that is gone in the middle of the tries ends them, and the pl
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`, LARGE)
   answers.tailExit = 1
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await status($)).toContain('Cache TTL: 5m (assumed: the transcript could not be read, it is tried again)')
   answers.hasTranscript = false
   await clock.advance(20 * S)
@@ -1389,7 +1374,7 @@ test('where no event names the transcript, it is found by the session id after t
   expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
   expect((await run($, 'report')).text).toContain("Transcript: path known yes, found by the session's id · exists yes")
   // An event that comes after all names it from then on.
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  await named($)
   expect((await run($, 'report')).text).toContain('Transcript: path known yes · exists')
 })
 
@@ -1439,13 +1424,78 @@ test('a resume inside a process that is told nothing is taken up by the session 
   expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)/)
 })
 
+// The guard Claude Code builds in, as it loads under a Team or Enterprise login or with managed settings: it
+// runs before every mod a person installed and sends Claude Code's own events on past them.
+const guard = {
+  name: 'guard',
+  tier: 'prepend',
+  register(on: On) {
+    on('classic.*', ($, e, next) => next.to(e, 'append'))
+  },
+}
+test('where a guard sends Claude Code\'s own events past the plugin, a turn still has its TTL read, by the session id', { plugins: [guard], options: { displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
+  answers.only = BY_ID
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  // Claude Code names the transcript, but the plugin is not told.
+  await named($)
+  await turn($, clock, 0)
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  const report = (await run($, 'report')).text ?? ''
+  expect(report).toContain("Transcript: path known yes, found by the session's id")
+  expect(report).toContain("Events seen: SessionStart 0, with the transcript's path 0")
+  expect(seen.logs).toEqual([])
+})
+
+test('after a /clear that no event names, the transcript of the conversation before is not taken up', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, transcriptOf(850))
+  // Only the old conversation's file is there, kept from before a reload; the new one is not written yet.
+  answers.only = '/elsewhere/old.jsonl'
+  answers.kept = '/elsewhere/old.jsonl'
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/State: warm/)
+  // The /clear starts the state over: nothing is kept any more.
+  answers.kept = ''
+  await $.session.end({ reason: 'clear', sessionId: 's' } as never)
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/State: unknown/)
+})
+
+// A hook on the Stop event would be skipped under the guard, and Claude Code would say so after every turn.
+test('the plugin has no hook on the Stop event: a Stop that names the transcript tells it nothing', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
+  on('classic.Stop', () => ({}))
+  answers.hasTranscript = false
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
+  expect((await run($, 'report')).text).toContain('Transcript: path known no')
+})
+
+test('after a reload the transcript an event named is read again, also where the session id finds none', { options: { displayBelowMinutes: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
+  // Kept elsewhere than where the id would find it, as the state holds it from before the reload.
+  answers.only = '/elsewhere/session.jsonl'
+  answers.kept = '/elsewhere/session.jsonl'
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
+  await turn($, clock, 0)
+  await clock.advance(3 * S)
+  expect(await status($)).toMatch(/Cache TTL: 1h \(read from the transcript\)/)
+  expect((await run($, 'report')).text).toContain('Transcript: path known yes · exists yes')
+})
+
 test('with an event that names the transcript the session id is not asked for', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   stubs(on, { HOME: '/srv/jane' }, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/my project' })
-  await $.classic.SessionStart({ source: 'startup', transcript_path: '/work/session.jsonl' } as never)
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   await clock.advance(5 * S)
   expect((await run($, 'report')).text).toContain('Transcript: path known yes · exists')
 })
@@ -1525,8 +1575,8 @@ test('a resume inside the process reads the new transcript at once, though the o
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, transcriptOf(1200))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($, '/work/old.jsonl')
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/old.jsonl', stop_hook_active: false })
   await $.session.end({ reason: 'resume', sessionId: 's' } as never)
   await resume($, { transcript_path: '/work/session.jsonl', seconds_since_last_response: 30 })
   expect(await status($)).toMatch(/State: warm\nCache TTL: 1h \(read from the transcript\)\nLast request to the API: 20 min ago/)
@@ -1607,8 +1657,8 @@ test('a session that keeps no transcript is not an error', async ($, on) => {
   const seen = stubs(on, {}, `${ASSISTANT_1H}\n`)
   answers.hasTranscript = false
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(seen.logs).toEqual([])
   expect(await status($)).toMatch(/Cache TTL: 5m \(assumed/)
 })
@@ -2064,8 +2114,8 @@ test('with the limit of the manifest an hour-long cache shows its countdown from
   const clock = mock.clock(on, { now: T0 })
   stubs(on, {}, `${ASSISTANT_1H}\n`)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await named($)
   await turn($, clock, 0)
-  await $.classic.Stop({ transcript_path: '/work/session.jsonl', stop_hook_active: false })
   expect(await bandText($)).toBe('drawn by Claude Code')
   await clock.advance(1499 * S)
   expect(await bandText($)).toBe('drawn by Claude Code')
@@ -2357,6 +2407,26 @@ test('the person can drop what the session asked for', async ($, on) => {
   expect(await status($)).toMatch(/State: warm/)
 })
 
+// Claude Code puts a dropped prompt back in the box: `answers.draft` holds what it put there, at once or
+// after `lateMs`.
+for (const [name, draft, lateMs, isCleared] of [['the digit alone is cleared', ' 2 ', 0, true], ['put back late, it is cleared too', '2', 1000, true], ['anything else stays', '2 and then the tests', 0, false]] as const) {
+  test(`after a digit answered, what comes back in the prompt box: ${name}`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await askingTurn($, clock)
+    await edit($, '', 0, 0, '2')
+    expect(await enter($, '2')).toEqual({ drop: 'cache-bell: Not now' })
+    const before = seen.fills.length
+    answers.draft = ''
+    await clock.advance(lateMs)
+    answers.draft = draft
+    await clock.advance(2 * S)
+    await clock.settle()
+    expect(seen.fills.slice(before)).toEqual(isCleared ? [''] : [])
+  })
+}
+
 test("another session's digit is a message like any other and answers nothing", async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
@@ -2383,6 +2453,27 @@ test('a digit that comes from no person in any other way answers nothing either'
   }
   expect(seen.toasts).toEqual([])
 })
+
+for (const [name, kind] of [['from the phone', 'bridge'], ['from Slack', 'slack-ping'], ['from another app', 'sdk']]) {
+  test(`the person's digit ${name} answers nothing and leaves the terminal's prompt alone`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await askingTurn($, clock)
+    // Only the terminal shows the question: 1 is Compact, and from elsewhere it goes on to the model.
+    expect(await $.prompt.submit({ text: '1', wait: false, origin: { kind } } as never)).not.toHaveProperty('drop')
+    await clock.advance(2 * S)
+    await clock.settle()
+    expect(seen.fills).toEqual([])
+    expect(seen.toasts).toEqual([])
+    // The message goes on to Claude and its turn takes the request back: nothing is compacted. (From Slack
+    // a digit never answered; that case only keeps it so.)
+    await turn($, clock, 3 * S, undefined, false)
+    await clock.advance(31 * S)
+    await clock.settle()
+    expect(seen.did.length).toBe(0)
+  })
+}
 
 test('set to auto the compaction follows the turn at once; set to off the session is refused', { options: { compactOnRequest: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
@@ -2546,6 +2637,29 @@ test('an announcement the person interrupts is not followed by a compaction', { 
   expect(seen.toasts).toEqual(['The compaction was called off: its announcement did not finish.'])
   expect(await bandText($)).toMatch(/nothing will be done$/)
 })
+
+// The announcement takes the message in, or the message waits and starts a turn of its own once it ends.
+for (const [name, isTakenIn] of [['taken in', true], ['kept for a turn of its own', false]] as const) {
+  test(`the person's message into the announcement, ${name}, calls off the compaction`, { options: ANNOUNCE, timeoutMs: LONG }, async ($, on) => {
+    const { clock, seen } = await idle($, on)
+    await clock.advance(240 * S)
+    expect(seen.did).toEqual(['prepare'])
+    await $.turn.start({ text: 'announcement', turnId: 'a' })
+    await request($)
+    await $.prompt.submit({ text: 'wait, fix the tests first', wait: false, turnId: 'a', origin: { kind: 'composer' } } as never)
+    if (isTakenIn) await request($)
+    await $.turn.complete({ turnId: 'a', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    if (!isTakenIn) {
+      await $.turn.start({ text: 'wait, fix the tests first', turnId: 'b' })
+      await $.turn.complete({ turnId: 'b', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    }
+    await clock.settle()
+    await clock.advance(20 * S)
+    expect(seen.did).toEqual(['prepare'])
+    expect(seen.toasts).toEqual(['The compaction was called off: you went on working.'])
+    expect(await status($)).toMatch(/State: warm/)
+  })
+}
 
 test('an announcement another plugin dropped leaves the conversation as it is', { options: ANNOUNCE, timeoutMs: LONG }, async ($, on) => {
   const { clock, seen } = await idle($, on)
@@ -2919,6 +3033,62 @@ test('notify with a waiting session request sends nothing at all without the per
   expect(logged(seen)).toEqual([])
   expect(await status($)).toContain('State: cold, expired')
 })
+
+// A message sent into a running turn: the turn takes it in, or the engine keeps it for a turn of its own that
+// proceeds with its text once the running one ends.
+test("the person's message the running turn took in starts the count of notes in a row over", { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  await $.turn.start({ text: '', turnId: 'r' })
+  await $.prompt.submit({ text: 'and check the tests', wait: false, turnId: 'r', origin: { kind: 'composer' } } as never)
+  await $.turn.complete({ turnId: 'r', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/you are sent your note/)
+  await clock.advance(32 * S)
+  await clock.settle()
+  expect(wakes(seen).length).toBe(2)
+})
+
+test("the person's message the running turn took in starts the count of renewals over", { options: KEEP, timeoutMs: LONG }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(3 * 240 * S)
+  expect(seen.did).toEqual(['fork', 'fork', 'fork'])
+  // Another session's turn, and the person writes into it.
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'a message from another session', turnId: 't' })
+  await $.prompt.submit({ text: 'and check the tests', wait: false, turnId: 't', origin: { kind: 'composer' } } as never)
+  await request($)
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.advance(240 * S)
+  expect(seen.did).toEqual(['fork', 'fork', 'fork', 'fork'])
+})
+
+for (const [name, nextText, isKept] of [['the running turn took in does not make the next turn its own', '', false], ['kept for a turn of its own makes that turn its own', 'a background task finished', true], ['kept with another for one turn makes that turn its own', 'and then\na background task finished', true]] as const) {
+  test(`a message ${name}`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    await askingTurn($, clock)
+    // Another session's turn interrupts the question; a task notification comes in while it runs.
+    await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+    await $.turn.start({ text: 'a message from another session', turnId: 'r' })
+    await $.prompt.submit({ text: 'a background task finished', wait: false, turnId: 'r', origin: { kind: 'task-notification' } } as never)
+    await $.turn.complete({ turnId: 'r', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    // The next turn starts with no prompt before it: the notification's own, or a continuation's.
+    await $.turn.start({ text: nextText, turnId: 'n' })
+    await $.turn.complete({ turnId: 'n', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    // Somebody else's turn only interrupts what the session asked for; a turn of unknown origin drops it.
+    await clock.advance(31 * S)
+    expect(seen.did.length).toBe(isKept ? 1 : 0)
+  })
+}
 
 // A turn another session's message starts: its prompt comes in with an origin that is not the person's.
 const otherTurn = async ($: Engine, clock: Clock, lastsMs: number, kind = 'peer') => {
@@ -3531,6 +3701,23 @@ test("the session's own message to its agents does not start the count of notes 
   expect(wakes(seen).length).toBe(1)
 })
 
+for (const [name, origin] of [['from Slack', { kind: 'slack-ping' }]] as const) {
+  test(`the person's message ${name} starts the count of notes in a row over`, { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    expect(await askingWith($, clock, 'Round 0.')).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    await $.prompt.submit({ text: 'carry on', wait: false, origin } as never)
+    expect(await askingWith($, clock, 'Round 1.', false)).toMatch(/you are sent your note/)
+    await clock.advance(32 * S)
+    await clock.settle()
+    expect(wakes(seen).length).toBe(2)
+  })
+}
+
 for (const kind of ['peer-send-message', 'projects-relay']) {
   test(`a message from another session delivered as ${kind} starts the count over too`, { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
@@ -3564,7 +3751,7 @@ test('a message from another session that another plugin drops does not start th
   expect(wakes(seen).length).toBe(1)
 })
 
-for (const [name, origin] of [['a task notification', { kind: 'task-notification' }], ['a message nobody could place', { kind: 'unclassified' }], ["another plugin's message", { kind: 'plugin', name: 'another-plugin' }]] as const) {
+for (const [name, origin] of [['a task notification', { kind: 'task-notification' }], ['a scheduled task', { kind: 'scheduled-trigger' }], ['what a channel relays', { kind: 'channel', server: 'ci' }], ['a message nobody could place', { kind: 'unclassified' }], ["another plugin's message", { kind: 'plugin', name: 'another-plugin' }]] as const) {
   test(`${name} does not start the count of notes in a row over`, { options: { compactCountdown: 30, compactNotesInRow: 1 } }, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     const seen = stubs(on)

@@ -57,8 +57,9 @@ const LATE_MS = [3 * 1000, 10 * 1000, 30 * 1000]
 // The module's own variables start over at every reload; what must survive one is in `$.state`.
 let ticker: { cancel: () => void } | null = null
 let lastTickAt = 0
-// The session's transcript, as the last Stop named it, and what is known of reading it: the file's size
-// and the time at the last read that went through, how many failed since, and when to try again.
+// The session's transcript, as an event named it or the session's id found it, and what is known of reading
+// it: the file's size and the time at the last read that went through, how many failed since, and when to try
+// again.
 let transcriptPath: string | undefined
 let readSize: number | null = null
 let readAt: number | null = null
@@ -77,7 +78,7 @@ const lookLater = (now: number): number | null => {
 let transcriptNo = 0
 // What reached this instance of the plugin, for /bell report: where a session's transcript is never named,
 // the counts say which event did not come or came without the path.
-const seen = { starts: 0, startsWithPath: 0, stops: 0, stopsWithPath: 0, requests: 0 }
+const seen = { starts: 0, startsWithPath: 0, requests: 0 }
 // Where Claude Code's own events do not reach the plugin, nothing names the transcript: the plugin then
 // looks for it by the session's id, a moment after the session started and after each turn, so an event
 // that does come goes first. `isNamedByEvent`: an event named it in this instance; `isFoundById`: the path
@@ -106,6 +107,8 @@ let isTurnOpen = false
 // person's does, and it does not carry a question over as somebody else's does.
 type TurnBy = 'person' | 'self' | 'other' | 'unknown'
 let nextTurnBy: TurnBy = 'unknown'
+// The text of a message sent into a running turn, which may start a turn of its own once that one ends.
+let nextTurnText: string | null = null
 // Who started the turn that is running.
 let turnBy: TurnBy = 'unknown'
 // The origins of another session's message, however it was delivered: as a turn of its own, as a SendMessage
@@ -114,6 +117,11 @@ let turnBy: TurnBy = 'unknown'
 const PEERS = ['peer', 'peer-send-message', 'projects-relay']
 // The origins of a prompt that are known not to be the person.
 const OTHERS = ['task-notification', 'scheduled-trigger', 'plugin', ...PEERS]
+// The origins of work from outside that starts the count of notes in a row over, besides the person's own
+// prompt: another session's message, and the owner's ping from Slack. The question stays the terminal's: a
+// ping's digit answers nothing. Not 'channel': what a channel relays may be a build's or a bot's, and work the
+// session started itself must not start the count over.
+const OUTSIDE = [...PEERS, 'slack-ping']
 
 // Why the plugin's next compaction comes and who decided, kept from the question or the request to the
 // compaction itself; `note` is what the session said when it asked. A compaction the plugin runs is logged
@@ -616,10 +624,14 @@ const transcriptById = async ($: EngineInterface): Promise<string | null | undef
 
 const findTranscript = async ($: EngineInterface, config: Config) => {
   if (isNamedByEvent || !config.readTranscript) return
+  // The path kept in the state from before a reload is this conversation's: /clear and a resume start the
+  // state over, not this module's variable. Where the id finds no file (a transcript kept elsewhere), it still
+  // names one; where it does, its spelling stays as it is.
+  const kept = (await read($, transcript)) ?? undefined
+  transcriptPath ??= kept
   let found = await transcriptById($)
+  if (typeof found !== 'string' && kept !== undefined && (await $.fs.exists(kept))) found = kept
   if (typeof found !== 'string' || isNamedByEvent) return
-  // The path kept from before a reload is this file in an event's spelling: it stays as it is.
-  transcriptPath ??= (await read($, transcript)) ?? undefined
   if (transcriptPath !== undefined && isSamePath(transcriptPath, found)) found = transcriptPath
   else isFoundById = true
   const state = await read($, machine)
@@ -710,6 +722,28 @@ const closeQuestion = ($: EngineInterface, choice: Choice, how: How) => {
   answer(choice, isTimers)
 }
 
+// Claude Code puts the text of a prompt a hook dropped back in the prompt box. A digit that answered the
+// question is taken out once it is there, and only while the box holds that digit alone: whatever the person
+// typed since stays. The box is empty right after the prompt went, so it is looked at until it holds
+// something, a few times. A question opened meanwhile reads the box for its own answer: then it stays.
+const DIGIT_BACK_MS = [150, 500, 1500]
+const clearDigit = async ($: EngineInterface, digit: string, at: number) => {
+  try {
+    if (question !== null) return
+    const box = await $.prompt.read()
+    if (box.text.trim() === '') {
+      const later = DIGIT_BACK_MS[at + 1]
+      if (later !== undefined) $.clock.after(later - (DIGIT_BACK_MS[at] ?? 0), () => void clearDigit($, digit, at + 1))
+      return
+    }
+    if (box.text.trim() !== digit) return
+    const filled = await $.prompt.fill({ text: '' })
+    if (!filled.isFilled) noted($, `digit not cleared: ${String((filled as { refusal?: string }).refusal ?? 'refused')}`)
+  } catch (err) {
+    noted($, `digit not cleared: ${String(err)}`)
+  }
+}
+
 const blink = async ($: EngineInterface) => {
   const now = await $.clock.now()
   // The question may have been closed while the clock was read.
@@ -771,6 +805,7 @@ const prepare = async ($: EngineInterface, config: Config) => {
   try {
     // The plugin's own prompt may not pass through its own prompt.submit hook: mark the turn here.
     nextTurnBy = 'self'
+    nextTurnText = null
     // An announced compaction is the timers' own: no note of the session's follows it.
     wakeText = ''
     const result = await $.prompt.submit({ text: config.preparePrompt })
@@ -845,6 +880,7 @@ const wake = async ($: EngineInterface, text: string, atTurns: number) => {
     wakeAtTurns = atTurns
     // The turn is somebody else's as the core sees it, whether or not the prompt passes this plugin's own hook.
     nextTurnBy = 'other'
+    nextTurnText = null
     const result = await $.prompt.submit({ text: prompt })
     if (result.drop === undefined) wakesInRow++
     else {
@@ -1205,8 +1241,8 @@ const USAGE = 'Usage: /bell status | report | log [count] | hour [on|off] | set 
 // What a report of a problem needs, gathered for the person to paste: see core/report.ts for what it holds.
 // The end of a large transcript is given half the hook's time: a report without it beats no report.
 const REPORT_READ_MS = 5000
-// How long after a Stop the read of the transcript is left to the hook itself: past the time a hook is given.
-const STOP_OWED_MS = 15000
+// How long after a turn the read of the transcript is left to the hook itself: past the time a hook is given.
+const TURN_OWED_MS = 15000
 const reportNow = async ($: EngineInterface, config: Config): Promise<string> => {
   await queue
   const now = await $.clock.now()
@@ -1533,6 +1569,7 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (isOwn && wakeSent !== null && e.text === wakeSent) {
       if (turnsStarted !== wakeAtTurns) return dropped(`${PLUGIN}: ${WAKE_OVERTAKEN}`)
       nextTurnBy = 'other'
+      nextTurnText = null
       return next(e)
     }
     const isPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
@@ -1540,12 +1577,20 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     // announces is off, and so is the announcement.
     if (isOwn && (await read($, machine))?.phase !== 'PREPARING') return dropped(`${PLUGIN}: ${OVERTAKEN}`)
     nextTurnBy = isOwn ? 'self' : isPerson ? 'person' : OTHERS.includes(e.origin.kind) ? 'other' : 'unknown'
-    // Another session's message is work from outside, as the person's is: notes after a compaction count
-    // from it again, once it got past the other plugins. A session the other sessions drive would otherwise
-    // wait for the person after a few.
+    nextTurnText = e.turnId === undefined ? null : e.text
+    // Another session's message, or the person's from elsewhere, is work from outside as the person's prompt
+    // is: notes after a compaction count from it again, once it got past the other plugins. A session the
+    // other sessions or a chat drive would otherwise wait for the terminal after a few.
     const passed = async () => {
       const result = await next(e)
-      if (PEERS.includes(e.origin.kind) && result.drop === undefined) wakesInRow = 0
+      // The turn proceeds with the text as the plugins below left it.
+      if (nextTurnText === e.text && typeof result.text === 'string') nextTurnText = result.text
+      // The person's own, here too: one the running turn takes in starts no turn that would count it.
+      if ((isPerson || OUTSIDE.includes(e.origin.kind)) && result.drop === undefined) wakesInRow = 0
+      // The person's message into the running turn starts no turn of theirs, and they are at work all the same.
+      // Counted only once it got past the other plugins, as the turn it would start; what it takes back is
+      // taken back before.
+      if (isPerson && e.turnId !== undefined && result.drop === undefined) void observe($, config, { kind: 'person-at-work' })
       return result
     }
     if (isPerson) void dismissIntro($)
@@ -1561,7 +1606,10 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     if (isPerson) lastEditAt = null
     // The person's message, also one sent into a turn that is running, takes back what the session asked
     // for and what waits: they are at work.
-    if (isPerson && (question === null || choiceOfDigit(question.choices, e.text.trim()) === null)) {
+    // Only the terminal shows the question: a digit sent from the phone or another app is a message, and the
+    // prompt it would clear is the terminal's.
+    const typed = question !== null && e.origin.kind === 'composer' ? choiceOfDigit(question.choices, e.text.trim()) : null
+    if (isPerson && typed === null) {
       // Forgotten here, not only when the turn starts: another plugin may drop the message.
       cause = OWN_CAUSE
       note = ''
@@ -1569,9 +1617,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       void observe($, config, { kind: 'withdrawn' })
     }
     if (question === null || e.origin.kind === 'plugin') return passed()
-    // The question is the person's: a digit from another session or a background task is a message like
-    // any other, and answers nothing.
-    const typed = isPerson ? choiceOfDigit(question.choices, e.text.trim()) : null
+    // The question is the person's in the terminal: a digit from another session, a background task or
+    // another of the person's surfaces is a message like any other, and answers nothing.
     if (typed === null) {
       // A real question is the core's to close, when the turn this message starts begins: a message that
       // starts no turn (another plugin dropped it) leaves the question up.
@@ -1580,6 +1627,8 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
       return passed()
     }
     closeQuestion($, typed, 'typed and confirmed with Enter')
+    const digit = e.text.trim()
+    $.clock.after(DIGIT_BACK_MS[0] ?? 0, () => void clearDigit($, digit, 0))
     return dropped(dropReason(textOf(typed)))
   })
 
@@ -1608,8 +1657,12 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
   on('turn.start', async ($, e, next) => {
     ensureStarted($, config)
     if (e.agentId === undefined) isTurnOpen = true
-    const by = nextTurnBy
+    // A message sent into a turn that was running starts the next turn only when the engine kept it for one:
+    // that turn proceeds with its text, maybe with others kept beside it. Otherwise the running turn took it
+    // in, and this turn is not its.
+    const by = nextTurnText === null || e.text.includes(nextTurnText) ? nextTurnBy : 'unknown'
     nextTurnBy = 'unknown'
+    nextTurnText = null
     turnBy = by
     turnsStarted++
     if (by === 'person') wakesInRow = 0
@@ -1639,7 +1692,20 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
     return yield* next(e)
   })
 
+  // The end of a turn is also when the transcript holds its response. Claude Code's Stop event is not used for
+  // that: where the organization's guard runs first (a Team or Enterprise login, managed settings) it never
+  // reaches the plugin, and every turn would end with a notice that it was skipped.
   on('turn.complete', async ($, e, next) => {
+    // The read is owed before the other hooks run: where they take the hook's whole time, or fail, a tick
+    // reads instead.
+    if (isWatching && e.agentId === undefined && isNamedByEvent) {
+      // Every turn has all its late looks.
+      lateLooks = 0
+      if (config.readTranscript && config.ttlMs === null) {
+        const owedAt = (await $.clock.now()) + TURN_OWED_MS
+        rereadAt = rereadAt === null ? owedAt : Math.min(rereadAt, owedAt)
+      }
+    }
     const result = await next(e)
     if (e.agentId === undefined) isTurnOpen = false
     if (isWatching && e.agentId === undefined) {
@@ -1654,35 +1720,9 @@ export const registerWith = (on: Parameters<Register>[0], options: Parameters<Re
         wakeText = ''
       }
       await offerSecondChance($, config)
+      // Last: reading a large transcript's tail starts a process.
+      if (isNamedByEvent) await readTranscriptTtl($, config, transcriptPath)
     }
-    return result
-  })
-
-  // The other Stop hooks go first: reading a large transcript's tail starts a process. The path is noted
-  // before them and the read is owed from then on: where they take the hook's whole time, or fail, a tick
-  // reads instead.
-  on('classic.Stop', async ($, e, next) => {
-    const path = typeof e.transcript_path === 'string' ? e.transcript_path : ''
-    seen.stops += 1
-    if (path !== '') seen.stopsWithPath += 1
-    if (isWatching && path !== '') {
-      isNamedByEvent = true
-      isFoundById = false
-      // What fails here must not keep the other Stop hooks from running.
-      try {
-        await nameTranscript($, path)
-        // Every turn has all its late looks.
-        lateLooks = 0
-        if (config.readTranscript && config.ttlMs === null) {
-          const owedAt = (await $.clock.now()) + STOP_OWED_MS
-          rereadAt = rereadAt === null ? owedAt : Math.min(rereadAt, owedAt)
-        }
-      } catch (err) {
-        noted($, `transcript not named: ${String(err)}`)
-      }
-    }
-    const result = await next(e)
-    if (isWatching) await readTranscriptTtl($, config, transcriptPath)
     return result
   })
 

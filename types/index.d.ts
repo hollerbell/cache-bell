@@ -80,7 +80,7 @@ export type State = {
 
 declare module 'claude-code' {
   interface PluginState {
-    // transcript: the session's transcript file as the last Stop named it, for a read to be tried again
+    // transcript: the session's transcript file as an event named it or the id found it, for a read to be tried again
     'cache-bell': { machine: State | null; transcript: string | null }
     // Written by the plugin built on this one (it carries this contract): true while it runs in the session.
     // This plugin only reads it, and stands down when it is set.

@@ -138,6 +138,8 @@ export const HOUR_NOT_GRANTED = 'Cache Bell asked for the hour-long prompt cache
 
 export const CALLED_OFF ='The compaction was called off: its announcement did not finish.'
 
+export const WORKED_ON = 'The compaction was called off: you went on working.'
+
 const coldText = (reason: ColdReason, ttlMs: number): string =>
   `${COLD_WHY[reason](Math.round(ttlMs / MINUTE_MS))} The next message re-sends the whole context uncached.`
 
@@ -375,6 +377,10 @@ const known = (before: State, after: State, now: number, config: Config): State 
   return isLate && planOf(after, config).asks ? { ...after, isDeclined: true } : after
 }
 
+// The person is at work: a new idle period starts, with nothing asked, declined or waiting from the last one,
+// a compaction Claude asked for included.
+const atWork = (now: number): Partial<State> => ({ ...FRESH, ...UNHELD, isRequested: false, requestMs: null, workedAt: now })
+
 const step = (state: State, now: number, observation: Observation, config: Config, extension: Extension): Decision => {
   const redraw: Action[] = [{ kind: 'redraw' }]
   const close: Action[] = state.phase === 'ASKING' ? [{ kind: 'close-question' }] : []
@@ -390,7 +396,7 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       // Only the person's own turn starts a new idle period; a background task's or another session's
       // message renews the cache but does not reset what was asked and how often it was renewed.
       // A compaction that waits for a subagent outlasts the turn its result comes back in.
-      const fresh = observation.by === 'person' ? { ...FRESH, ...UNHELD, workedAt: now } : {}
+      const fresh = observation.by === 'person' ? atWork(now) : {}
       // A turn known to be somebody else's (another session's message, a background task's result)
       // interrupts an open question without answering it. What the session asked for is kept, with the time
       // its countdown had left, and asked about again when that turn ends; a question about the cache is
@@ -406,6 +412,20 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       const passed = isExtensions(state) && observation.by === 'person' ? { ext: extension.passedOver(state) } : {}
       return { state: { ...state, ...fresh, ...passed, ...unasked, ...UNASKED, ...kept, isOrdered: false, lastCompaction: null, phase: 'BUSY', resumeTo }, actions: [...close, ...redraw] }
     }
+
+    // The person's message went into the turn that is running and starts no turn of its own: they are at
+    // work as with a turn they start. No question is open in a turn. Into the plugin's own announcement it
+    // calls off the compaction of the timers, as Esc does, and the turn goes on as theirs; one the person
+    // ordered goes ahead. Sent as the announcement ends, it finds the compaction about to run and calls it
+    // off as well, if the shell has not begun it yet. What Claude asks for in the rest of that turn counts as
+    // in any turn of the person's.
+    case 'person-at-work':
+      if (state.phase === 'BUSY') return { state: { ...state, ...atWork(now) }, actions: [] }
+      if ((state.phase !== 'PREPARING' && state.phase !== 'COMPACTING') || state.isOrdered) return { state, actions: [] }
+      return {
+        state: { ...state, ...atWork(now), ...(state.phase === 'PREPARING' ? { phase: 'BUSY', resumeTo: restOf(state) } : { phase: 'WARM' }) },
+        actions: [{ kind: 'notify', text: WORKED_ON }, ...redraw],
+      }
 
     case 'request': {
       const anchored = { ...state, anchorAt: observation.sentAt, priorAnchorAt: state.anchorAt, retryAt: null }

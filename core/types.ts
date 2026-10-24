@@ -15,6 +15,8 @@ export type Observation =
   // 'other' is known to be somebody else's (another session, a background task), 'unknown' is a turn whose
   // origin nobody stated.
   | { kind: 'turn-start'; by: 'person' | 'self' | 'other' | 'unknown' }
+  // the person's message went into the turn that is running, which takes it in
+  | { kind: 'person-at-work' }
   | { kind: 'request'; sentAt: number }
   // isAborted: the turn was interrupted or ended in an error instead of an answer
   // isFailed: it ended in an error, so its last request may never have reached the cache

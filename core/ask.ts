@@ -178,7 +178,7 @@ export const withdrawAnswer = (hadRequest: boolean): string =>
 // of its own. Only the session's own request is followed so; a compaction the timers bring wakes nobody.
 export const WAKE_MAX_CHARS = 2000
 // Only so many compactions in a row (compactNotesInRow) are followed by a prompt with no message from the
-// person or from another session between them (the texts for the model name the person only): a session that asks again in the turn it was woken into must not go round for ever.
+// person (also from Slack) or from another session between them (the texts for the model name the person only): a session that asks again in the turn it was woken into must not go round for ever.
 // 0 = the person took the limit off.
 export const mayWake = (inRow: number, max: number): boolean => max === 0 || inRow < max
 

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ASK_GRACE_MS, CALLED_OFF, LATE_MARGIN_MS, RENEW_FAILED, RESUMED_MIN_MS, RETRY_AFTER_MS, TOO_SOON, WORK_GRACE_MS, canRenew, decide, defaultChoice, initialState, planOf } from '../../core/decide'
+import { ASK_GRACE_MS, CALLED_OFF, LATE_MARGIN_MS, RENEW_FAILED, RESUMED_MIN_MS, RETRY_AFTER_MS, TOO_SOON, WORKED_ON, WORK_GRACE_MS, canRenew, decide, defaultChoice, initialState, planOf } from '../../core/decide'
 import { countdownOf, fillInstructions, isCacheHit } from '../../core/guards'
 import { TTL_1H, deadlines } from '../../core/timing'
 import type { Action, Config, Observation, State } from '../../core/types'
@@ -155,6 +155,37 @@ test('work by the person starts a new idle period; a background task does not', 
   expect(decide(used, ACT, { kind: 'turn-start', by: 'other' }, base).state).toMatchObject({ phase: 'BUSY', renewals: 2, isAsked: true, isDeclined: true })
   // A turn of the plugin's own outside the announcement is treated as any other.
   expect(decide(used, ACT, { kind: 'turn-start', by: 'self' }, base).state).toMatchObject({ phase: 'BUSY', renewals: 2 })
+})
+
+test("the person's message the running turn takes in starts a new idle period, after Not now and after Let it expire", () => {
+  for (const chosen of [{ isDeclined: true }, { isDeclined: true, isLetExpire: true }]) {
+    // Another session's message runs a turn; the person writes into it.
+    const busy = decide(warm({ renewals: 2, isAsked: true, ...chosen }), ACT, { kind: 'turn-start', by: 'other' }, base).state
+    expect(busy).toMatchObject({ phase: 'BUSY', isDeclined: true })
+    const result = decide(busy, ACT + S, { kind: 'person-at-work' }, base)
+    expect(result.state).toMatchObject({ phase: 'BUSY', renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, isLetExpire: false, workedAt: ACT + S })
+    expect(result.actions).toEqual([])
+  }
+  // Outside a turn, and in the announcement of a compaction the person ordered, nothing changes.
+  for (const phase of ['PREPARING', 'COMPACTING', 'WARM'] as const) {
+    const before = warm({ phase, isDeclined: true, isOrdered: true })
+    expect(decide(before, ACT, { kind: 'person-at-work' }, base).state).toBe(before)
+  }
+})
+
+test("the person's message into the announcement calls off the compaction of the timers, and the turn is theirs", () => {
+  const announcing = run(warm({ phase: 'PREPARING', renewals: 2, isAsked: true }), [[ACT, { kind: 'turn-start', by: 'self' }], [ACT + S, { kind: 'request', sentAt: ACT + S }]])
+  const result = decide(announcing, ACT + 2 * S, { kind: 'person-at-work' }, base)
+  expect(result.state).toMatchObject({ phase: 'BUSY', resumeTo: 'WARM', renewals: 0, isAsked: false, isDeclined: false, workedAt: ACT + 2 * S })
+  expect(result.actions).toEqual([{ kind: 'notify', text: WORKED_ON }, { kind: 'redraw' }])
+  // The turn ends as the person's own: nothing is compacted.
+  const ended = decide(result.state, ACT + 9 * S, { kind: 'turn-complete' }, base)
+  expect(ended.state).toMatchObject({ phase: 'WARM', anchorAt: ACT + S })
+  expect(kinds(ended.actions)).not.toContain('compact')
+  // Sent as the announcement ended, it finds the compaction about to run.
+  const late = decide(warm({ phase: 'COMPACTING', isDeclined: true }), ACT + 3 * S, { kind: 'person-at-work' }, base)
+  expect(late.state).toMatchObject({ phase: 'WARM', isDeclined: false, workedAt: ACT + 3 * S })
+  expect(late.actions).toEqual([{ kind: 'notify', text: WORKED_ON }, { kind: 'redraw' }])
 })
 
 test('work that starts while the plugin asks or acts takes over', () => {
@@ -702,6 +733,14 @@ test('a turn the person did not start interrupts a question about the session\'s
   // The person interrupts the turn that came in between: the request goes with it.
   const carried = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, base).state
   expect(decide(carried, T0 + 20 * S, { kind: 'turn-complete', isAborted: true }, base).state).toMatchObject({ phase: 'WARM', isRequested: false })
+  // The person writes into that turn: the request goes as with a turn they start, and the question does not come back.
+  const written = decide(carried, T0 + 18 * S, { kind: 'person-at-work' }, base).state
+  expect(written).toMatchObject({ phase: 'BUSY', isRequested: false, requestMs: null })
+  const after = decide(run(written, [[T0 + 19 * S, { kind: 'request', sentAt: T0 + 19 * S }]]), T0 + 25 * S, done(150000), base)
+  expect(after.state.phase).toBe('WARM')
+  expect(kinds(after.actions)).not.toContain('ask')
+  // What Claude asks for after the person's message counts, as in any turn of theirs.
+  expect(decide(written, T0 + 20 * S, { kind: 'requested', countdownMs: 30 * S }, base).state).toMatchObject({ isRequested: true, requestMs: 30 * S })
   // Set to wait, the question comes back too, and still only the person compacts.
   const wait = configOf({ compactOnRequest: 'wait' })
   const waiting = decide(asking, T0 + 15 * S, { kind: 'turn-start', by: 'other' }, wait).state

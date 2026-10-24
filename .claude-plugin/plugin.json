@@ -1,7 +1,7 @@
 {
   "name": "cache-bell",
   "displayName": "Cache Bell",
-  "version": "0.3.11",
+  "version": "0.3.18",
   "description": "Cache & context manager for Claude Code. Once the context passes a size you choose, Claude compacts after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt cache warm or compacts before it expires.",
   "author": {
     "name": "FEO digital agency s.r.o."
@@ -82,7 +82,7 @@
     "compactNotesInRow": {
       "type": "number",
       "title": "Compactions in a row followed by a note",
-      "description": "When Claude asks for a compaction, it may leave itself a note. The note is sent back as a prompt once the compaction is done, so the session carries on by itself. This sets how many compactions in a row may be followed by such a note before you have to write a message. A message from another Claude session counts as yours. Every note starts a new turn, and those turns count against the limits of your plan, or are billed to your API key. 0 = no limit: the session can keep going without you for as long as Claude keeps leaving notes. Default: 5.",
+      "description": "When Claude asks for a compaction, it may leave itself a note. The note is sent back as a prompt once the compaction is done, so the session carries on by itself. This sets how many compactions in a row may be followed by such a note before you have to write a message. A message you send from Slack counts too, and so does one from another Claude session. Every note starts a new turn, and those turns count against the limits of your plan, or are billed to your API key. 0 = no limit: the session can keep going without you for as long as Claude keeps leaving notes. Default: 5.",
       "default": 5,
       "min": 0,
       "max": 1000
