@@ -155,6 +155,14 @@ export const chosenNotice = (text: string, texts: Readonly<Record<string, Choice
   return `${BAND_PREFIX} ${match[1]} chosen`
 }
 
+// What stops the digit of the last answer, put back in the prompt box by Claude Code, from answering the next
+// question, and the transcript line that says so; null for any other line.
+export const leftReason = (digit: string): string => `${PLUGIN}: ${digit} left over`
+export const leftNotice = (text: string): string | null => {
+  const match = new RegExp(`(?:^|: )${PLUGIN}: (\\d) left over$`).exec(text)
+  return match === null ? null : `${BAND_PREFIX} the ${match[1]} in the prompt was left over from your last answer and answers nothing. Type your choice again.`
+}
+
 // Claude Code's line after it loaded the plugin again (an option changed, a file changed), which lists every
 // hook: cut to what happened. Null for any other line.
 export const reloadNotice = (text: string): string | null => {

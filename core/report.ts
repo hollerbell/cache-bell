@@ -107,6 +107,8 @@ export type ReportFacts = {
   transcript: { isKnown: boolean; isById: boolean; exists: boolean | null; size: number | null; readAt: number | null; failed: number; rereadAt: number | null }
   // how many of Claude Code's events reached this instance of the plugin, and how many named the transcript
   events: { starts: number; startsWithPath: number; requests: number }
+  // told by the runner that Claude Code's guard keeps the classic hooks: SessionStart is not registered
+  guarded: boolean
   // the end of the transcript, or why it was not read (the plugin's own words); null = there was nothing
   // to read
   tail: Digest | string | null
@@ -196,7 +198,7 @@ export const problemReport = (state: State, now: number, config: Config, facts: 
   else rows.push(`End of the transcript: responses of the main thread ${facts.tail.responses} · usage of the last: ${facts.tail.usage ?? 'none'}`)
   const { events } = facts
   rows.push(
-    `Events seen: SessionStart ${events.starts}, with the transcript's path ${events.startsWithPath} · requests of the main thread ${events.requests}`,
+    `Events seen: ${facts.guarded ? 'SessionStart not registered (guarded)' : `SessionStart ${events.starts}, with the transcript's path ${events.startsWithPath}`} · requests of the main thread ${events.requests}`,
   )
   rows.push(`The plugin's last notices: ${facts.notices.length === 0 ? 'none' : ''}`)
   for (const notice of facts.notices) rows.push(`  ${notice}`)

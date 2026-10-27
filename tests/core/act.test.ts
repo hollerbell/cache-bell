@@ -157,7 +157,7 @@ test('work by the person starts a new idle period; a background task does not', 
   expect(decide(used, ACT, { kind: 'turn-start', by: 'self' }, base).state).toMatchObject({ phase: 'BUSY', renewals: 2 })
 })
 
-test("the person's message the running turn takes in starts a new idle period, after Not now and after Let it expire", () => {
+test("the person's message the running turn takes in starts a new idle period, after Not now and after Let it expire; outside a turn it changes nothing", () => {
   for (const chosen of [{ isDeclined: true }, { isDeclined: true, isLetExpire: true }]) {
     // Another session's message runs a turn; the person writes into it.
     const busy = decide(warm({ renewals: 2, isAsked: true, ...chosen }), ACT, { kind: 'turn-start', by: 'other' }, base).state
@@ -166,17 +166,24 @@ test("the person's message the running turn takes in starts a new idle period, a
     expect(result.state).toMatchObject({ phase: 'BUSY', renewals: 0, renewalsSent: 0, isAsked: false, isDeclined: false, isLetExpire: false, workedAt: ACT + S })
     expect(result.actions).toEqual([])
   }
-  // Outside a turn, and in the announcement of a compaction the person ordered, nothing changes.
-  for (const phase of ['PREPARING', 'COMPACTING', 'WARM'] as const) {
+  // Outside a turn nothing changes, whether or not a compaction was ordered.
+  for (const phase of ['UNKNOWN', 'WARM', 'ASKING', 'RENEWING', 'COLD', 'DORMANT'] as const) {
+    for (const isOrdered of [false, true]) {
+      const before = warm({ phase, isDeclined: true, isOrdered })
+      expect(decide(before, ACT, { kind: 'person-at-work' }, base)).toEqual({ state: before, actions: [] })
+    }
+  }
+  // Nor in the announcement of a compaction the person ordered.
+  for (const phase of ['PREPARING', 'COMPACTING'] as const) {
     const before = warm({ phase, isDeclined: true, isOrdered: true })
-    expect(decide(before, ACT, { kind: 'person-at-work' }, base).state).toBe(before)
+    expect(decide(before, ACT, { kind: 'person-at-work' }, base)).toEqual({ state: before, actions: [] })
   }
 })
 
 test("the person's message into the announcement calls off the compaction of the timers, and the turn is theirs", () => {
   const announcing = run(warm({ phase: 'PREPARING', renewals: 2, isAsked: true }), [[ACT, { kind: 'turn-start', by: 'self' }], [ACT + S, { kind: 'request', sentAt: ACT + S }]])
   const result = decide(announcing, ACT + 2 * S, { kind: 'person-at-work' }, base)
-  expect(result.state).toMatchObject({ phase: 'BUSY', resumeTo: 'WARM', renewals: 0, isAsked: false, isDeclined: false, workedAt: ACT + 2 * S })
+  expect(result.state).toMatchObject({ phase: 'BUSY', resumeTo: null, renewals: 0, isAsked: false, isDeclined: false, workedAt: ACT + 2 * S })
   expect(result.actions).toEqual([{ kind: 'notify', text: WORKED_ON }, { kind: 'redraw' }])
   // The turn ends as the person's own: nothing is compacted.
   const ended = decide(result.state, ACT + 9 * S, { kind: 'turn-complete' }, base)
@@ -186,6 +193,41 @@ test("the person's message into the announcement calls off the compaction of the
   const late = decide(warm({ phase: 'COMPACTING', isDeclined: true }), ACT + 3 * S, { kind: 'person-at-work' }, base)
   expect(late.state).toMatchObject({ phase: 'WARM', isDeclined: false, workedAt: ACT + 3 * S })
   expect(late.actions).toEqual([{ kind: 'notify', text: WORKED_ON }, { kind: 'redraw' }])
+})
+
+test("the person's message calls off a compaction Claude asked for, as it takes back the request", () => {
+  const auto = configOf({ compactOnRequest: 'auto' })
+  const asked = run(warm(), [[ACT, { kind: 'turn-start', by: 'other' }], [ACT + S, { kind: 'request', sentAt: ACT + S }], [ACT + 2 * S, { kind: 'requested' }]], auto)
+  const ended = decide(asked, ACT + 3 * S, { kind: 'turn-complete' }, auto)
+  expect(ended.state).toMatchObject({ phase: 'COMPACTING', isOrdered: false })
+  const result = decide(ended.state, ACT + 3 * S + 100, { kind: 'person-at-work' }, auto)
+  expect(result.state).toMatchObject({ phase: 'WARM', isRequested: false, workedAt: ACT + 3 * S + 100 })
+  expect(result.actions).toEqual([{ kind: 'notify', text: WORKED_ON }, { kind: 'redraw' }])
+})
+
+test('once the shell has begun the compaction, a message of the person does not call it off and nobody is told it did', () => {
+  for (const isOrdered of [false, true]) {
+    const begun = decide(warm({ phase: 'COMPACTING', isOrdered }), ACT, { kind: 'compact-begun' }, base).state
+    expect(begun).toMatchObject({ phase: 'COMPACTING', isOrdered: true })
+    expect(decide(begun, ACT + S, { kind: 'person-at-work' }, base)).toEqual({ state: begun, actions: [] })
+  }
+  // Begun too late: the compaction was called off already.
+  const off = warm()
+  expect(decide(off, ACT, { kind: 'compact-begun' }, base).state).toBe(off)
+})
+
+test('a failed request of the announcement the person took over still shows as failed when the turn ends', () => {
+  const announcing = run(warm({ phase: 'PREPARING' }), [[ACT, { kind: 'turn-start', by: 'self' }], [ACT + S, { kind: 'request', sentAt: ACT + S }]])
+  const taken = decide(announcing, ACT + 2 * S, { kind: 'person-at-work' }, base).state
+  const failed = decide(taken, ACT + 3 * S, { kind: 'turn-complete', isFailed: true }, base)
+  // The cache is known to have seen the request before the announcement, not the one that failed.
+  expect(failed.state).toMatchObject({ phase: 'WARM', anchorAt: T0 })
+  // Taken over before the announcement sent anything, the turn fails with no request of its own: the cache is
+  // where it was, not where it was before the last request.
+  const asking = warm({ phase: 'ASKING', askReason: 'cache', askDeadline: ACT, priorAnchorAt: T0 - 100 * S })
+  const early = run(asking, [[ACT, { kind: 'answer', choice: 'compact', isTimers: true, hold: null }], [ACT + S, { kind: 'turn-start', by: 'self' }], [ACT + 2 * S, { kind: 'person-at-work' }]])
+  expect(early).toMatchObject({ phase: 'BUSY', resumeTo: 'WARM' })
+  expect(decide(early, ACT + 3 * S, { kind: 'turn-complete', isFailed: true }, base).state).toMatchObject({ phase: 'WARM', anchorAt: T0 })
 })
 
 test('work that starts while the plugin asks or acts takes over', () => {
@@ -467,6 +509,19 @@ test('a turn whose last request ended in an error falls back to what the cache i
   // A turn that failed before any request leaves a warm cache as it was.
   const before = run(warm(), [[T0 + 60 * S, { kind: 'turn-start', by: 'person' }]])
   expect(decide(before, T0 + 61 * S, { kind: 'turn-complete', isAborted: true, isFailed: true }, base).state).toMatchObject({ phase: 'WARM', anchorAt: T0 })
+})
+
+test('a failed request after a renewal falls back to the renewal, and after a model switch to nothing', () => {
+  // The renewal reached the cache: the next turn's request that fails falls back to it, not to the turn before.
+  const renewed = decide(warm({ phase: 'RENEWING', isAsked: true, priorAnchorAt: T0 - 60 * S }), ACT + S, { kind: 'renewed', isHit: true, sentAt: ACT }, base).state
+  const after = run(renewed, [[ACT + 10 * S, { kind: 'turn-start', by: 'person' }], [ACT + 11 * S, { kind: 'request', sentAt: ACT + 11 * S }]])
+  expect(decide(after, ACT + 12 * S, { kind: 'turn-complete', isFailed: true }, base).state).toMatchObject({ phase: 'WARM', anchorAt: ACT })
+  // Another model reads nothing from the old one's cache: a turn that fails after the switch knows nothing.
+  const switched = run(warm(), [[T0 + 60 * S, { kind: 'turn-start', by: 'person' }], [T0 + 61 * S, { kind: 'request', sentAt: T0 + 61 * S }], [T0 + 62 * S, { kind: 'model-switch', ttlMs: null }]])
+  expect(decide(switched, T0 + 63 * S, { kind: 'turn-complete', isFailed: true }, base).state).toMatchObject({ phase: 'UNKNOWN', anchorAt: null })
+  // Switched before the turn's first request too.
+  const first = run(warm({ priorAnchorAt: T0 - 60 * S }), [[T0 + 60 * S, { kind: 'turn-start', by: 'person' }], [T0 + 61 * S, { kind: 'model-switch', ttlMs: null }]])
+  expect(decide(first, T0 + 62 * S, { kind: 'turn-complete', isFailed: true }, base).state).toMatchObject({ phase: 'UNKNOWN', anchorAt: null })
 })
 
 test('a renewal that got no answer is tried once more, a little later, and then left alone', () => {

@@ -68,7 +68,7 @@ type Seen = {
 }
 
 // What the stubs answer where a test needs something else than the usual.
-const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, isPeerDropped: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, kept: null as string | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null }
+const answers = { tailExit: 0, compactSkip: false, hasTranscript: true, forkRead: 143985, tokens: 143985, isSuperseded: false, theme: 'dark', isAnnouncementDropped: false, isPeerDropped: false, isFillRefused: false, fork: 'answered' as 'answered' | 'unanswered' | 'throws', stored: null as State | null, kept: null as string | null, agents: [] as string[], listed: 0, isListBroken: false, isCompactBroken: false, isStoreBroken: false, rows: {} as Record<string, unknown>, sets: [] as string[], looked: 0, draft: '', grown: 0, appended: '', only: '', usages: 0, isUsageBroken: false, settings: {} as Record<string, unknown>, markGate: null as Promise<void> | null, takeOutGate: null as Promise<void> | null, whileCompacting: null as (() => Promise<unknown>) | null }
 
 // Everything Claude Code would answer, so the mod's hooks run to their end.
 const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, transcript = ASSISTANT_5M, size = 100): Seen => {
@@ -84,6 +84,7 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   answers.theme = 'dark'
   answers.isAnnouncementDropped = false
   answers.isPeerDropped = false
+  answers.isFillRefused = false
   answers.fork = 'answered'
   answers.stored = null
   answers.kept = null
@@ -102,6 +103,7 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   answers.settings = {}
   answers.markGate = null
   answers.takeOutGate = null
+  answers.whileCompacting = null
   // `answers.rows` are the plugin's own rows of /config, by key; a row named "locked" refuses a change.
   on('config.list', (() => ({
     value: [
@@ -223,7 +225,7 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   })
   on('prompt.fill', ($, e) => {
     seen.fills.push(e.text)
-    return { isFilled: true }
+    return (answers.isFillRefused ? { isFilled: false, refusal: 'dialog' } : { isFilled: true }) as never
   })
   // `answers.agents` holds the status of each subagent of the session.
   on('agent.list', () => {
@@ -241,8 +243,9 @@ const stubs = (on: On, env: Record<string, string> = { HOME: '/srv/jane' }, tran
   on('turn.complete', () => ({ text: '' }))
   on('classic.SessionStart', () => ({}))
   on('classic.PostModelSwitch', () => ({}))
-  on('session.compact', ($, e) => {
+  on('session.compact', async ($, e) => {
     if (e.trigger !== 'manual' && e.trigger !== 'precompute' && e.trigger !== 'auto') seen.did.push(`compact[${String(e.trigger)}]: ${e.instructions ?? ''}`)
+    await answers.whileCompacting?.()
     if (answers.isCompactBroken) throw new Error('overloaded')
     return answers.compactSkip ? { skip: 'a hook said no' } : { messages: SUMMARY, tokensBefore: answers.tokens, tokensAfter: 21400 }
   })
@@ -2392,6 +2395,26 @@ test("after Let it expire Claude Code's idle compaction is held, and the cache i
   expect(seen.did).toEqual([])
 })
 
+// Told it is guarded, the plugin registers none of the hooks Claude Code's guard keeps: whatever reaches them
+// goes past it, as it would on such an account.
+test('guarded, the plugin holds no compaction and takes no model switch or SessionStart', { options: { guarded: true } }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(60 * S)
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toMatchObject({ tokensAfter: 21400 })
+  expect(logged(seen)).toEqual([])
+  await $.classic.PostModelSwitch({ cache_ttl: '1h', prompt_cache_warm: true } as never)
+  expect(await status($)).not.toMatch(/model changed/)
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(await status($)).not.toMatch(/State: unknown/)
+})
+
+// Off, as everywhere the runner says nothing, the hooks stay. Claude Code lets no other type than a boolean in.
+test("guarded off, Claude Code's own idle compaction is still held", { options: { guarded: false } }, async ($, on) => {
+  const { clock } = await idle($, on)
+  await clock.advance(60 * S)
+  expect(await $.session.compact({ trigger: 'auto', messages: SUMMARY })).toEqual({ skip: "Cache Bell looks after this idle session's cache" })
+})
+
 test('the person can drop what the session asked for', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
@@ -2409,7 +2432,7 @@ test('the person can drop what the session asked for', async ($, on) => {
 
 // Claude Code puts a dropped prompt back in the box: `answers.draft` holds what it put there, at once or
 // after `lateMs`.
-for (const [name, draft, lateMs, isCleared] of [['the digit alone is cleared', ' 2 ', 0, true], ['put back late, it is cleared too', '2', 1000, true], ['anything else stays', '2 and then the tests', 0, false]] as const) {
+for (const [name, draft, lateMs, isCleared] of [['the digit alone is cleared', ' 2 ', 0, true], ['put back late, it is cleared too', '2', 1000, true], ['put back after 3 s, it is cleared too', '2', 3000, true], ['anything else stays', '2 and then the tests', 0, false]] as const) {
   test(`after a digit answered, what comes back in the prompt box: ${name}`, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     const seen = stubs(on)
@@ -2421,11 +2444,143 @@ for (const [name, draft, lateMs, isCleared] of [['the digit alone is cleared', '
     answers.draft = ''
     await clock.advance(lateMs)
     answers.draft = draft
-    await clock.advance(2 * S)
+    await clock.advance(6 * S)
     await clock.settle()
     expect(seen.fills.slice(before)).toEqual(isCleared ? [''] : [])
   })
 }
+
+// The demo question: Compact is its default, 2 is Renew cache.
+const DEMO_LINE = 'h⣿ Cache Bell: Cache expires soon: No answer: Compact in 0:30'
+
+test('a digit put back after the plugin stopped looking is no answer to the next question', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await clock.advance(10 * S)
+  answers.draft = '2'
+  const before = seen.fills.length
+  await run($, 'demo 30')
+  await clock.settle()
+  // It is taken out, so that Enter does not send it as one.
+  expect(seen.fills.slice(before)).toEqual([''])
+  expect((await question($)).text).toBe(DEMO_LINE)
+})
+
+test('the same digit typed more than a minute after the answer is the next question\'s choice', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await clock.advance(2 * 60 * S)
+  await edit($, '', 0, 0, '2')
+  answers.draft = '2'
+  const before = seen.fills.length
+  await run($, 'demo 30')
+  await clock.settle()
+  expect(seen.fills.slice(before)).toEqual([])
+  expect(await question($)).toMatchObject({ selected: ['[2] >Renew cache<'] })
+})
+
+// Claude Code fires no prompt.edit when it puts the digit back: what came without one is no typing.
+test('a digit put back while the next question is open is cleared, and is no choice', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await run($, 'demo 30')
+  const before = seen.fills.length
+  await clock.advance(1 * S)
+  answers.draft = '2'
+  await clock.advance(6 * S)
+  await clock.settle()
+  expect(seen.fills.slice(before)).toEqual([''])
+  expect((await question($)).text).toMatch(/No answer: Compact in/)
+})
+
+// Later than the plugin looks, or where it could not clear it, Enter on it is the only thing left to stop.
+test('Enter on a digit put back under the next question does nothing, and the box is cleared again', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await run($, 'demo 30')
+  await clock.advance(10 * S)
+  answers.draft = '2'
+  const before = seen.fills.length
+  expect(await enter($, '2')).toEqual({ drop: 'cache-bell: 2 left over' })
+  // So it can be traced in the plugin's log.
+  expect(seen.logs).toEqual(['Enter on the 2 left over did nothing'])
+  await clock.advance(1 * S)
+  await clock.settle()
+  expect(seen.fills.slice(before)).toEqual([''])
+  expect((await question($)).text).toMatch(/No answer: Compact in/)
+  // Typed by the person, the same digit answers.
+  await edit($, '', 0, 0, '2')
+  expect(await enter($, '2')).toEqual({ drop: 'cache-bell: Renew cache' })
+})
+
+test('a question that opens later than the answer looks at the box itself for a digit put back', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await clock.advance(20 * S)
+  await run($, 'demo 30')
+  const before = seen.fills.length
+  await clock.advance(1 * S)
+  answers.draft = '2'
+  await clock.advance(6 * S)
+  await clock.settle()
+  expect(seen.fills.slice(before)).toEqual([''])
+})
+
+test('only Enter in the terminal under a question, within a minute of the answer, is held for the digit left over', async ($, on) => {
+  const { clock } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await clock.advance(10 * S)
+  // No question open: a message like any other.
+  expect(await enter($, '2')).not.toHaveProperty('drop')
+  await run($, 'demo 600')
+  // From another session: a message like any other.
+  expect(await $.prompt.submit({ text: '2', wait: false, origin: { kind: 'peer' } } as never)).not.toHaveProperty('drop')
+  // More than a minute after the answer: an answer. (The message closed the demo question.)
+  await clock.advance(60 * S)
+  await run($, 'demo 600')
+  expect(await enter($, '2')).toEqual({ drop: 'cache-bell: Renew cache' })
+})
+
+test('a digit not put back leaves the next question alone: the same digit typed under it answers', async ($, on) => {
+  const { clock } = await opened($, on)
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = ''
+  await clock.advance(10 * S)
+  await run($, 'demo 30')
+  await edit($, '', 0, 0, '2')
+  expect(await question($)).toMatchObject({ selected: ['[2] >Renew cache<'] })
+  expect(await enter($, '2')).toEqual({ drop: 'cache-bell: Renew cache' })
+})
+
+test('a digit Claude Code does not let the plugin clear is said, and is not taken for the next question\'s choice', async ($, on) => {
+  const { clock, seen } = await opened($, on)
+  answers.isFillRefused = true
+  await edit($, '', 0, 0, '2')
+  await enter($, '2')
+  answers.draft = '2'
+  await clock.advance(1 * S)
+  await clock.settle()
+  // The kit passes on no reason of the refusal.
+  expect(seen.logs).toEqual(['digit not cleared: refused'])
+  await run($, 'demo 30')
+  await clock.settle()
+  expect((await question($)).text).toBe(DEMO_LINE)
+  // Nor does Enter send it as one.
+  expect(await enter($, '2')).toEqual({ drop: 'cache-bell: 2 left over' })
+})
 
 test("another session's digit is a message like any other and answers nothing", async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
@@ -2686,6 +2841,17 @@ test('a turn that begins in the second before the compaction takes it back', { o
   expect(seen.did).toEqual(['prepare'])
   expect(seen.toasts).toEqual([])
   expect(await busyStatus($, seen)).toMatch(/State: busy/)
+})
+
+test("the person's message while the compaction runs does not say it was called off", { options: ANNOUNCE }, async ($, on) => {
+  const { clock, seen } = await idle($, on)
+  await clock.advance(240 * S)
+  answers.whileCompacting = () => $.prompt.submit({ text: 'and one more thing', wait: false, turnId: 'x', origin: { kind: 'composer' } } as never)
+  await ownTurn($, clock)
+  await clock.advance(5 * S)
+  expect(seen.did.length).toBe(2)
+  expect(seen.toasts).toEqual([])
+  expect(await status($)).toMatch(/State: dormant/)
 })
 
 // The person typing: one key into the prompt box.
@@ -3090,6 +3256,123 @@ for (const [name, nextText, isKept] of [['the running turn took in does not make
   })
 }
 
+test('of two messages sent into a running turn, the older one kept for a turn of its own makes that turn its own', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'a message from another session', turnId: 'r' })
+  await $.prompt.submit({ text: 'a background task finished', wait: false, turnId: 'r', origin: { kind: 'task-notification' } } as never)
+  await $.prompt.submit({ text: 'a scheduled task fired', wait: false, turnId: 'r', origin: { kind: 'scheduled-trigger' } } as never)
+  await $.turn.complete({ turnId: 'r', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  // The running turn took in the newer one; the older one starts a turn of its own.
+  await $.turn.start({ text: 'a background task finished', turnId: 'n' })
+  await $.turn.complete({ turnId: 'n', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  await clock.advance(31 * S)
+  expect(seen.did.length).toBe(1)
+})
+
+test('a message sent into a running turn and dropped by another plugin makes no turn its own', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'a message from another session', turnId: 'r' })
+  answers.isPeerDropped = true
+  expect(await $.prompt.submit({ text: 'one more message', wait: false, turnId: 'r', origin: { kind: 'peer' } } as never)).toEqual({ drop: 'another plugin keeps it out' })
+  await $.turn.complete({ turnId: 'r', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  // A turn whose text happens to hold it is not that message's: its origin is not known, and it drops the request.
+  await $.turn.start({ text: 'one more message', turnId: 'n' })
+  await $.turn.complete({ turnId: 'n', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  await clock.advance(31 * S)
+  expect(seen.did.length).toBe(0)
+})
+
+test("the person's message and another session's joined into one turn make it the person's", async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await $.prompt.submit({ text: 'carry on', wait: false, origin: { kind: 'composer' } })
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'carry on\na message from another session', turnId: 'j' })
+  await $.turn.complete({ turnId: 'j', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  // The person is at work: the question does not come back, and nothing is compacted.
+  await clock.advance(31 * S)
+  expect(seen.did.length).toBe(0)
+})
+
+// Two messages sent into a running turn and kept for one turn of their own: the turn is of others when both are,
+// and of unknown origin when one is.
+for (const [name, kind, isKept] of [['of others only interrupt the question', 'task-notification', true], ['one of unknown origin among them takes back what Claude asked for', 'channel', false]] as const) {
+  test(`two messages sent into a running turn and kept for one turn: ${name}`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    await askingTurn($, clock)
+    await clock.advance(10 * S)
+    await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+    await $.turn.start({ text: 'a message from another session', turnId: 'r' })
+    await $.prompt.submit({ text: 'one more from another session', wait: false, turnId: 'r', origin: { kind: 'peer-send-message' } } as never)
+    await $.prompt.submit({ text: 'and one more', wait: false, turnId: 'r', origin: { kind } } as never)
+    await $.turn.complete({ turnId: 'r', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    await $.turn.start({ text: 'one more from another session\nand one more', turnId: 'n' })
+    await $.turn.complete({ turnId: 'n', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+    await clock.settle()
+    if (isKept) expect((await question($)).text).toBe('h⣿ Cache Bell: The session asked for a compaction: No answer: Compact in 0:20')
+    await clock.advance(21 * S)
+    expect(seen.did.length).toBe(isKept ? 1 : 0)
+  })
+}
+
+for (const [name, origin] of [["a coordinating session's hand-off", { kind: 'coordinator' }], ["an observer's report", { kind: 'observer' }], ["an observer's digest", { kind: 'observer-activity' }]] as const) {
+  test(`${name} only interrupts the question`, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    const seen = stubs(on)
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+    await turn($, clock, 0)
+    await askingTurn($, clock)
+    await $.prompt.submit({ text: 'a build finished', wait: false, origin } as never)
+    await turn($, clock, 0, undefined, false)
+    await clock.settle()
+    await clock.advance(31 * S)
+    expect(seen.did.length).toBe(1)
+  })
+}
+
+test("the person's ping from Slack that the running turn takes in takes back what the session asked for", { options: { compactCountdown: 30 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  // Below the level: nothing but the request would be asked about.
+  answers.tokens = 50000
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await $.turn.start({ text: 'wrap up', turnId: 'w' })
+  const stream = $.turn.step({ turnId: 'w', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  await $.tool.call({ tool: 'mcp__cache-bell__compact', reason: 'the task is done' } as never)
+  // The running turn takes the ping in: no turn of its own starts.
+  await $.prompt.submit({ text: 'and check the tests', wait: false, turnId: 'w', origin: { kind: 'slack-ping' } } as never)
+  await clock.settle()
+  await $.turn.complete({ turnId: 'w', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.advance(31 * S)
+  await clock.settle()
+  expect(seen.did).toEqual([])
+})
+
 // A turn another session's message starts: its prompt comes in with an origin that is not the person's.
 const otherTurn = async ($: Engine, clock: Clock, lastsMs: number, kind = 'peer') => {
   await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind } } as never)
@@ -3134,6 +3417,29 @@ test('a message from another session only interrupts the question about what Cla
   expect(logged(seen)).toMatchObject([{ why: 'session', by: 'timer', note: 'the task is done' }])
 })
 
+test("the person's message into the turn another session's message starts takes back what Claude asked for", async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await clock.advance(10 * S)
+  // Another session's message starts a turn, and the person types as it starts: the turn takes it in.
+  await $.prompt.submit({ text: 'a message from another session', wait: false, origin: { kind: 'peer' } } as never)
+  await $.turn.start({ text: 'a message from another session', turnId: 'o' })
+  await $.prompt.submit({ text: 'and check the tests', wait: false, turnId: 'o', origin: { kind: 'composer' } } as never)
+  const stream = $.turn.step({ turnId: 'o', index: 0, model: 'claude-test', messageCount: 1 })
+  let step = await stream.next()
+  while (step.done !== true) step = await stream.next()
+  await $.turn.complete({ turnId: 'o', answer: 'ok', durationMs: 0, isAborted: false, reason: 'answer' })
+  await clock.settle()
+  // The question does not come back, and nothing is compacted.
+  await clock.advance(60 * S)
+  await clock.settle()
+  expect(seen.did).toEqual([])
+  expect((await question($)).text).not.toMatch(/asked for a compaction/)
+})
+
 test('a choice the person typed is still selected when the interrupted question comes back', async ($, on) => {
   const clock = mock.clock(on, { now: T0 })
   const seen = stubs(on)
@@ -3160,6 +3466,20 @@ test('a turn whose origin nobody stated drops what the session asked for', async
   await askingTurn($, clock)
   await clock.advance(10 * S)
   await turn($, clock, 5 * S, undefined, false)
+  await clock.settle()
+  expect(await bandText($)).not.toMatch(/asked for a compaction/)
+  await clock.advance(60 * S)
+  expect(seen.did).toEqual([])
+})
+
+test('a turn that what a channel relays starts drops what the session asked for: it may be the person in a chat', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const seen = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await turn($, clock, 0)
+  await askingTurn($, clock)
+  await $.prompt.submit({ text: 'how far are you?', wait: false, origin: { kind: 'channel', server: 'telegram' } } as never)
+  await turn($, clock, 0, undefined, false)
   await clock.settle()
   expect(await bandText($)).not.toMatch(/asked for a compaction/)
   await clock.advance(60 * S)

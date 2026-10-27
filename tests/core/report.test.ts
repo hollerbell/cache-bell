@@ -79,6 +79,7 @@ const facts = (over: Partial<ReportFacts> = {}): ReportFacts => ({
   transcript: { isKnown: true, exists: true, size: 2512331, readAt: T0 - 38000, failed: 0, rereadAt: null },
   tail: digestOf(row(USAGE)),
   events: { starts: 1, startsWithPath: 1, requests: 9 },
+  guarded: false,
   notices: [],
   ...over,
 })
@@ -99,6 +100,8 @@ test('the report says what an issue needs, row by row', () => {
     "Events seen: SessionStart 1, with the transcript's path 1 · requests of the main thread 9",
     "The plugin's last notices: none",
   ])
+  // Guarded, no SessionStart can come: its count would only look like a fault.
+  expect(problemReport(state, T0, config, facts({ guarded: true })).split('\n')[9]).toBe('Events seen: SessionStart not registered (guarded) · requests of the main thread 9')
 })
 
 test('the report says on which surfaces the band was asked for and drawn, and which came and went', () => {

@@ -64,7 +64,8 @@ export type State = {
   // A compaction that was due and waits: for what, and whether its announcement is behind it (made, or not
   // needed). null = none waits.
   held: { by: Hold; isTold: boolean } | null
-  // The person themselves said Compact: the compaction on its way waits for nothing.
+  // The person themselves said Compact, or the shell has begun the compaction: it waits for nothing and
+  // nothing calls it off.
   isOrdered: boolean
   // When the person last sent a message of their own: how long the session has been idle counts from here.
   workedAt: number | null

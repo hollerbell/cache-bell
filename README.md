@@ -6,7 +6,7 @@
   Cache Bell
 </h1>
 
-![licence: MIT](docs/badge-licence.svg) ![version: 0.3.18](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 440 passing](docs/badge-tests.svg)
+![licence: MIT](docs/badge-licence.svg) ![version: 0.3.26](docs/badge-version.svg) ![Claude Code 2.1.288 or newer](docs/badge-claude-code.svg) ![tests: 468 passing](docs/badge-tests.svg)
 
 **A cache & context manager for Claude Code.** Once the context passes a size you choose, Claude compacts
 after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt
@@ -71,7 +71,7 @@ your plan. With `cache-bell.profile` = `watch` nothing is sent and Claude is tol
   an hour-long cache expires, and a compaction cannot be undone. If you follow sessions over Remote
   Control, set `cache-bell.compactOnRequest` to `wait` and `cache-bell.idleCompact` to `off`: then nothing
   is compacted without your answer. With `cache-bell.profile` = `watch` nothing is sent at all.
-- 0.3.18 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
+- 0.3.26 is experimental. The desktop app's Code tab and the SDK are not supported yet; in `claude -p` the
   plugin does nothing, except that it removes the hour-long cache setting it inherited from the plugin.
 - Coming from 0.2.x: the options have new names, and Claude now compacts by itself past 200K. See
   [CHANGELOG.md](CHANGELOG.md) for what was taken over and how to keep the behaviour of 0.2.13.
@@ -108,7 +108,7 @@ automatically: see [Update](#update).
 To try it for one session without installing, clone the repository and run in the clone:
 `claude --plugin-dir .`
 
-0.3.18, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
+0.3.26, experimental. Needs Claude Code 2.1.288 or newer, and was tested with each release up to 2.1.294 (the plugin
 uses the mods API, which is early access and changes between releases). Tested on Windows and macOS, in
 the terminal; Linux is not tested yet. Before you rely on it, read [the points above](#before-you-rely-on-it).
 
@@ -174,6 +174,7 @@ description names it.
 | `cacheRequestHour` | `ask` | `ask`: the first-run notice asks what you do after a reply, and only "come back within the hour" (or `/bell hour on`) asks for the hour-long cache. `on`: always. `off`: never. See [The hour-long cache](#the-hour-long-cache). |
 | `display` | `status` | Where the countdown shows: `band` (above the prompt), `status` (the status line), `both` or `off`. Questions always show above the prompt. |
 | `displayBelowMinutes` | `15` | The countdown shows once this many minutes or fewer are left; `0` = always. |
+| `guarded` | `false` | For a runner that starts Claude Code and knows its guard sits ahead of the plugins: on, the plugin registers none of the hooks the guard keeps. See [Limits](#limits). |
 
 `compactInstructions` works like the text after `/compact`, but only for the compactions the plugin starts:
 before an idle session's cache expires, and when Claude asks for one. Your own `/compact` and Claude Code's
@@ -213,6 +214,9 @@ A light theme gets darker colours.
 - The choice between the arrows is the one that is done when the countdown on the last line ends.
 - Type a choice's digit into the empty prompt to select it; Enter does it at once. The digit is not sent
   to the model.
+- Claude Code puts the digit you answered with back in the prompt; the plugin takes it out. If it is still
+  there under the next question, it selects nothing and Enter on it does nothing. Type the digit again to
+  choose.
 - A click on a choice does it at once.
 - Any other message you send closes the question: your turn renews the cache anyway.
 - A message from another session, or a background task's result, only interrupts the question: when that
@@ -238,7 +242,9 @@ A renewal is one request that reads the whole context from the cache, the announ
 turn, a compaction is one summary. A compaction replaces the conversation with that summary: what the
 summary leaves out is gone from the context. These requests count against the limits of your plan, or
 are billed to your API key. The plugin never sends more than three renewal requests in one idle period,
-answered or not; only your own message starts the count over.
+answered or not; only your own message starts the count over. That includes a message you send while
+Claude is working, which Claude takes in during that turn: the idle period starts over, as after a
+message that starts a turn, and `Not now` or `Let it expire` no longer holds for the next one.
 
 A conversation below 80 000 tokens is left alone when the cache runs out: the plugin only shows the
 countdown (`idleMinContextK`). A compaction Claude asks for still comes.
@@ -275,6 +281,12 @@ A compaction the timer starts waits while you type (a key in the prompt box with
 while a subagent of the session still runs. It never waits past the cache: if the cache runs out first,
 nothing is compacted and the band says so. Text that only lies in the prompt box holds nothing back, and
 neither does a background shell command. Your own answer `Compact` is carried out at once.
+
+A message you send while the session answers the announcement calls off a compaction the timer started,
+as Esc does, and counts as your work; the turn goes on as yours. So does a message sent just as that turn
+ends, before the compaction has begun. A message sent just before a compaction Claude asked for calls that
+one off too, as any message of yours takes back what Claude asked for. A compaction you chose with
+`Compact` goes ahead, and so does any compaction Claude Code has already begun.
 
 After a compaction of its own the band says what was done, until your next message:
 
@@ -408,6 +420,13 @@ the Claude Code configuration directory), the last 200 entries, for all sessions
   it stops that compaction and goes on as it is set to. With `profile` `watch` or `off`, or below
   `idleMinContextK`, it lets it go ahead and goes to sleep after it, as before. To turn it off in Claude Code,
   set `idleCompaction` to `false` in its settings.
+- On a Team or Enterprise account, or under managed settings, Claude Code runs its guard ahead of the
+  plugins and keeps their `classic.*` hooks and `session.compact` from them; it then says at every start
+  that Cache Bell's hook was skipped. The plugin works without those hooks, with three gaps: it cannot
+  stop Claude Code's own compaction of an idle session; a `/compact` of yours or Claude Code's own is not
+  logged, and the plugin learns of it only with the next request; a model switch is not seen. Started by
+  a runner that sets `guarded`, the plugin registers none of these hooks and the message goes away;
+  installed on its own, the message stays for now.
 - The colours for a light background are tested, but not yet checked in a real light terminal.
 - The plugin uses only the official mods API and does not patch Claude Code.
 
@@ -470,15 +489,18 @@ What it reads:
   the question's digits (when a second digit is typed after the first, it puts that digit alone into the
   box); at any time, to note when you last typed. What you typed is not kept or logged, only the time.
   After your digit answered a question, Claude Code puts it back in the box: the plugin then reads the box
-  up to three times within two seconds and empties it when it holds that digit alone. Anything else in the
-  box is left there, and not kept or logged;
+  up to four times within five seconds, also under the next question, and empties it when it holds that
+  digit alone and you have typed nothing since. Anything else in the box is left there, and not kept or
+  logged;
 - the list of the session's subagents, for whether one still runs;
 - every message that is sent, at the moment it is sent: its text and where it comes from (you, another
   session, a background task, a plugin). The text is compared with the digits of an open question and with
-  the plugin's own prompts, and is not logged. It is not kept either, except that the plugin holds a message
-  sent while Claude is working in its memory until the next turn starts, to tell whether that turn is
-  yours, and then forgets it. A message of yours typed in the terminal that is exactly a digit of the open question is
-  your answer: the plugin takes it and does not let it reach Claude;
+  the plugin's own prompts, and is not logged. It is not kept either, except that the plugin holds the
+  messages sent while Claude is working in its memory until the next turn starts, to tell whether that turn
+  is yours, and then forgets them; a message another plugin keeps out is forgotten at once. A message of
+  yours typed in the terminal that is exactly a digit of the open question is your answer: the plugin takes
+  it and does not let it reach Claude. The digit of your last answer that Claude Code put back, with nothing
+  typed since, answers nothing and does not reach Claude either;
 - when each request to the model is sent, when a turn starts and ends and how it ended, and each compaction
   with its sizes before and after: the times, the counts and the reasons, nothing of what was said; also
   the model's name of the last request, held in memory for `/bell report` and not written anywhere;
@@ -547,7 +569,8 @@ call and prompt.
 
 What it changes in the transcript, through the interface Claude Code gives plugins for it: two notices
 Claude Code writes there itself. The line saying that a hook dropped a prompt, written when you answer a
-question with a digit, is replaced by a line that names the choice. The line Claude Code writes after it
+question with a digit, is replaced by a line that names the choice, or that says the digit left over from
+your last answer answered nothing. The line Claude Code writes after it
 loaded the plugin again is cut to its first part, without the list of hooks. No other line is touched.
 
 What its prompts carry. The announcement before a compaction carries the text of the option

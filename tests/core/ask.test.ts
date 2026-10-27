@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { NONE } from '../../core/extension'
 import { initialState } from '../../core/decide'
-import { CHOICES, CHOICES_OF, FRAME_MS, SWING_MS, askView, chosenNotice, choiceLabel, choiceOfDigit, digitOf, dropReason, mixColor, questionParts, reloadNotice, requestAnswer, swing, wakeOf, wakePrompt, whyText, WAKE_MAX_CHARS } from '../../core/ask'
+import { CHOICES, CHOICES_OF, FRAME_MS, SWING_MS, askView, chosenNotice, choiceLabel, choiceOfDigit, digitOf, dropReason, leftNotice, leftReason, mixColor, questionParts, reloadNotice, requestAnswer, swing, wakeOf, wakePrompt, whyText, WAKE_MAX_CHARS } from '../../core/ask'
 import type { OwnChoice } from '../../core/ask'
 import { COMPACT_ONLY, KEEP, configOf } from './options'
 import { TTL_1H, TTL_5M } from '../../core/timing'
@@ -152,6 +152,21 @@ test('the transcript line for a confirmed digit says what was chosen, not that a
     ['', null],
   ]
   for (const [text, said] of table) expect({ text, said: chosenNotice(text) }).toEqual({ text, said })
+})
+
+test('the transcript line for a digit left over says it answered nothing', () => {
+  expect(leftReason('2')).toBe('cache-bell: 2 left over')
+  const table: [string, string | null][] = [
+    ['Prompt dropped by a hook: cache-bell: 2 left over', 'h⣿ Cache Bell: the 2 in the prompt was left over from your last answer and answers nothing. Type your choice again.'],
+    ['cache-bell: 3 left over', 'h⣿ Cache Bell: the 3 in the prompt was left over from your last answer and answers nothing. Type your choice again.'],
+    // Another plugin's line, and any other line of ours, are left alone.
+    ['Prompt dropped by a hook: other-plugin: 2 left over', null],
+    ['Prompt dropped by a hook: x-cache-bell: 2 left over', null],
+    ['Prompt dropped by a hook: cache-bell: Not now', null],
+    ['cache-bell: 2 left over twice', null],
+    ['', null],
+  ]
+  for (const [text, said] of table) expect({ text, said: leftNotice(text) }).toEqual({ text, said })
 })
 
 test('the line Claude Code writes after a reload loses its list of hooks', () => {

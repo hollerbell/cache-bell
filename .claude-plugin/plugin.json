@@ -1,7 +1,7 @@
 {
   "name": "cache-bell",
   "displayName": "Cache Bell",
-  "version": "0.3.18",
+  "version": "0.3.26",
   "description": "Cache & context manager for Claude Code. Once the context passes a size you choose, Claude compacts after a finished piece of work, and you get time to cancel. While you're away, the plugin keeps the prompt cache warm or compacts before it expires.",
   "author": {
     "name": "FEO digital agency s.r.o."
@@ -204,6 +204,12 @@
       "type": "string",
       "title": "Mode (0.2.x, replaced by profile)",
       "description": "Kept so that a mode set before 0.3.4 still counts: notify is the watch profile, keep is bellcompact with compactLevelK 0, idleCompact off, idleAsk never and 3 renewals, prepare-compact is bellcompact, compact-only is bellcompact with idleCompact on and idleAsk never, without renewals or announcement. Set profile instead and leave this empty. (notify, keep, prepare-compact, compact-only or custom)"
+    },
+    "guarded": {
+      "type": "boolean",
+      "title": "Claude Code guards this plugin's classic hooks",
+      "description": "Set by a runner that starts Claude Code where Claude Code seats its guard ahead of the plugins (a Team or Enterprise account, managed settings). On: the plugin registers none of the hooks the guard keeps, so Claude Code does not report them skipped. Leave it off otherwise.",
+      "default": false
     }
   }
 }

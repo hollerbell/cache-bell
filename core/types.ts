@@ -28,6 +28,8 @@ export type Observation =
   | { kind: 'renewed'; isHit: boolean; sentAt: number }
   // a renewal's request got no answer (an API error, a refusal): the cache is as warm as it was
   | { kind: 'renew-failed' }
+  // the shell is about to call Claude Code's compaction: nothing calls it off any more
+  | { kind: 'compact-begun' }
   | { kind: 'compact-failed' }
   // the shell was about to compact and found something in the way
   | { kind: 'held'; hold: Hold }

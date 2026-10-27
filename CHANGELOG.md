@@ -2,6 +2,46 @@
 
 What changed in each version, newest first. `/bell status` says which version runs.
 
+## 0.3.26
+
+- A new option, `guarded`, for a runner that starts Claude Code where its guard keeps the plugins' classic hooks (a Team or Enterprise account, managed settings). On, the plugin registers none of those hooks, and Claude Code no longer says at every start that Cache Bell's hook was skipped. Until now the message came at every start on such an account. Installed on its own, without such a runner, the message still comes; the README says so under Limits.
+
+## 0.3.25
+
+- When you switch the model while Claude is working and that turn then ends in an error before another request, the plugin now says it does not know the cache. Until now it took the cache as warm from the last request of the old model, which the new one cannot read.
+- Not changed, only said now: since 0.3.24, a digit you bring back from your earlier prompts with the up arrow, under a question and within a minute of answering with the same digit, may also do nothing on Enter. Type it, and it answers.
+
+## 0.3.24
+
+- The digit you answered a question with, when Claude Code puts it back in the prompt box only after the next question opened, is now taken out too, and Enter on it does nothing: it neither answers that question nor goes to Claude. The same goes for a digit Claude Code does not let the plugin clear. A digit you type again answers as before. Until now such a digit stayed in the box, and Enter sent it as your answer.
+
+## 0.3.23
+
+- The README now says that a message you send while Claude is working counts as your work, and that one sent while the session answers the announcement calls the compaction off. This changelog now uses "note" only for what Claude leaves for itself and gets back after a compaction; what it writes before a compaction is its answer to the announcement. The plugin works as before.
+
+## 0.3.22
+
+- No change in what the plugin does: more tests for messages that come in while Claude is working.
+
+## 0.3.21
+
+- The digit you answered a question with is now taken out of the prompt box also when Claude Code puts it back there up to 5 seconds later. Until now it stayed in the box when it came back after 1.5 seconds.
+- A digit left over in the prompt box from your last answer, when it is there as the next question opens within a minute, no longer counts as your choice. The plugin takes it out, so that Enter does not send it. Until now the next question took it for your choice. A digit Claude Code puts back only after the question opened still stays: it cannot be told from one you typed.
+
+## 0.3.20
+
+- When you send a message while the plugin asks, another session's message comes in at the same time, and Claude Code joins them into one turn, that turn now counts as yours: what Claude asked for is taken back and the question does not come back. Until now the other session's message could hide yours.
+- When several messages come in while Claude is working, the turn that one of them starts now knows whose it is from that message. Until now only the last message counted, and a turn an earlier one started was taken for one of unknown origin, which takes back a compaction Claude asked for.
+- A coordinating session's hand-off or an observer agent's report now only interrupts a question, as another session's message does. Until now it was taken for one of unknown origin and took back what Claude asked for. A message a channel relays (Slack, Telegram) still takes it back: it may be you writing from a chat, where you would not see the question come back.
+- A ping from you in Slack now counts as your message at once: what Claude asked for is taken back, also when Claude takes the ping in during the turn that runs. Until now it was taken back only when the ping started a turn of its own.
+- A message that another plugin keeps out is forgotten at once. Until now the plugin held its text until the next turn started and could count that turn as the message's.
+
+## 0.3.19
+
+- Once a compaction has begun, a message you send no longer brings the line "The compaction was called off: you went on working." The compaction goes ahead. Until now that line could show while the compaction ran.
+- When you write while Claude answers the announcement before a compaction and the request of that turn fails, the plugin now counts the cache from the request before it. Until now it counted from the failed request as if the cache had seen it, and could renew or compact after the cache had already run out.
+- This changelog said for 0.3.15 that only a compaction the timers brought is called off by a message you send just before it. A compaction Claude asked for is called off too, as any message of yours takes back what Claude asked for. Only the changelog was wrong; the plugin works as before.
+
 ## 0.3.18
 
 - Under a Team or Enterprise login, or with managed settings, a finished turn no longer ends with the line "cache-bell: its classic.Stop hook was skipped". The plugin no longer uses Claude Code's Stop event: it reads the transcript when the turn ends. Until now Claude Code's built-in guard sent that event on past the plugin and said so after every turn.
@@ -18,11 +58,11 @@ What changed in each version, newest first. `/bell status` says which version ru
 
 ## 0.3.15
 
-- A message you send while Claude writes its note before a compaction the timers brought now calls that compaction off, as Esc does, and counts as your work. Until now the compaction followed all the same. A compaction you chose yourself still goes ahead.
+- A message you send while Claude answers the announcement before a compaction the timers brought now calls that compaction off, as Esc does, and counts as your work. Until now the compaction followed all the same. A compaction you chose yourself still goes ahead.
 
 ## 0.3.14
 
-- A message you send while Claude is working (not while it writes its note before a compaction), which Claude takes in during that turn, now counts as your work as one that starts a turn does: the idle period and its renewals start over, and "Not now" or "Let it expire" no longer holds for the next idle period. Until now such a message changed nothing of it, so after "Let it expire" the cache was left to expire although you had gone on working.
+- A message you send while Claude is working (not while it answers the announcement before a compaction), which Claude takes in during that turn, now counts as your work as one that starts a turn does: the idle period and its renewals start over, and "Not now" or "Let it expire" no longer holds for the next idle period. Until now such a message changed nothing of it, so after "Let it expire" the cache was left to expire although you had gone on working.
 
 ## 0.3.13
 
@@ -91,7 +131,7 @@ This version renames and regroups the options of 0.2.x (see "Options of 0.2.13" 
 
   The plugin asks, renews and compacts only when it knows the lifetime. Until now it could renew an hour-long cache needlessly.
 - `minContextTokens` is now `idleMinContextK`. Its default is 80, meaning 80 000 tokens (it was 100 000 tokens in 0.2.13).
-- Once the context is half full, Claude gets a one-line note on its size after tool results (`compactContextNotices`, on by default). You don't see it, and it sends no extra request.
+- Once the context is half full, Claude gets one line on its size after tool results (`compactContextNotices`, on by default). You don't see it, and it sends no extra request.
 
 ### Options of 0.2.13
 

@@ -278,8 +278,9 @@ const act = (asked: State, choice: Choice, config: Config, extension: Extension,
   }
   const isOrdered = say === 'person'
   const isPrepared = !isTold && config.prepareBeforeCompact && config.preparePrompt !== ''
+  // The announcement has sent no request yet: until it does, a turn the person takes it over with knows of none.
   return isPrepared
-    ? { state: { ...state, isOrdered, phase: 'PREPARING' }, actions: [...close, { kind: 'prepare' }, { kind: 'redraw' }] }
+    ? { state: { ...state, isOrdered, phase: 'PREPARING', resumeTo: restOf(asked) }, actions: [...close, { kind: 'prepare' }, { kind: 'redraw' }] }
     : { state: { ...state, isOrdered, phase: 'COMPACTING' }, actions: [...close, { kind: 'compact' }, { kind: 'redraw' }] }
 }
 
@@ -416,20 +417,27 @@ const step = (state: State, now: number, observation: Observation, config: Confi
     // The person's message went into the turn that is running and starts no turn of its own: they are at
     // work as with a turn they start. No question is open in a turn. Into the plugin's own announcement it
     // calls off the compaction of the timers, as Esc does, and the turn goes on as theirs; one the person
-    // ordered goes ahead. Sent as the announcement ends, it finds the compaction about to run and calls it
-    // off as well, if the shell has not begun it yet. What Claude asks for in the rest of that turn counts as
-    // in any turn of the person's.
+    // ordered goes ahead. Sent as the turn before a compaction ends, it finds the compaction about to run and
+    // calls it off as well: one of the timers, and one Claude asked for, which any message of the person's
+    // takes back. Once the shell has begun it, nothing calls it off. What Claude asks for in the rest of that
+    // turn counts as in any turn of the person's.
     case 'person-at-work':
       if (state.phase === 'BUSY') return { state: { ...state, ...atWork(now) }, actions: [] }
       if ((state.phase !== 'PREPARING' && state.phase !== 'COMPACTING') || state.isOrdered) return { state, actions: [] }
       return {
-        state: { ...state, ...atWork(now), ...(state.phase === 'PREPARING' ? { phase: 'BUSY', resumeTo: restOf(state) } : { phase: 'WARM' }) },
+        // The turn goes on with what the announcement saw: once its request went out, one that fails must
+        // show as failed when the turn ends.
+        state: { ...state, ...atWork(now), ...(state.phase === 'PREPARING' ? { phase: 'BUSY', resumeTo: state.resumeTo } : { phase: 'WARM' }) },
         actions: [{ kind: 'notify', text: WORKED_ON }, ...redraw],
       }
 
+    // The shell begins the compaction: from here it goes ahead as one the person ordered.
+    case 'compact-begun':
+      return state.phase === 'COMPACTING' && !state.isOrdered ? { state: { ...state, isOrdered: true }, actions: [] } : { state, actions: [] }
+
     case 'request': {
       const anchored = { ...state, anchorAt: observation.sentAt, priorAnchorAt: state.anchorAt, retryAt: null }
-      if (state.phase === 'PREPARING') return { state: anchored, actions: [] }
+      if (state.phase === 'PREPARING') return { state: { ...anchored, resumeTo: null }, actions: [] }
       return { state: { ...anchored, ...UNASKED, phase: 'BUSY', coldReason: null, resumeTo: null }, actions: [...close, ...redraw] }
     }
 
@@ -556,8 +564,8 @@ const step = (state: State, now: number, observation: Observation, config: Confi
       const takesTtl = observation.ttlMs !== null && acceptsTtl(state.ttlSource, 'model-switch')
       const next: State = takesTtl ? { ...state, ttlMs: observation.ttlMs as number, ttlSource: 'model-switch' } : state
       // Another model reads nothing from this one's cache. A running turn keeps running; its next request
-      // sets a new anchor.
-      if (state.phase === 'BUSY') return { state: { ...next, anchorAt: null, resumeTo: null }, actions: redraw }
+      // sets a new anchor. One that fails has nothing of this model's to fall back to.
+      if (state.phase === 'BUSY') return { state: { ...next, anchorAt: null, priorAnchorAt: null, resumeTo: null }, actions: redraw }
       if (state.phase === 'WARM' || state.phase === 'ASKING') {
         return { state: { ...next, ...UNASKED, ...UNHELD, phase: 'COLD', coldReason: 'model-switch' }, actions: [...close, ...redraw] }
       }
